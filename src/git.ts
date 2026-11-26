@@ -85,3 +85,59 @@ export function committableFiles(root: string): string[] | undefined {
   if (!result.ok) return undefined;
   return result.stdout.split('\0').filter((path) => path !== '');
 }
+
+/** True when the repository holds this commit. */
+export function hasCommit(root: string, sha: string): boolean {
+  return git(['cat-file', '-e', `${sha}^{commit}`], root).ok;
+}
+
+/** The id of the file tree of a commit. Two commits with the same tree hold exactly the same files. */
+export function treeOf(root: string, commit: string): string | undefined {
+  const result = git(['rev-parse', '--verify', '--quiet', `${commit}^{tree}`], root);
+  if (!result.ok) return undefined;
+  const tree = result.stdout.trim();
+  return tree === '' ? undefined : tree;
+}
+
+export type MergedTree =
+  | { readonly kind: 'clean'; readonly tree: string }
+  | { readonly kind: 'conflict' }
+  | { readonly kind: 'error'; readonly message: string };
+
+/**
+ * Works out the file tree that merging `head` into `base` would produce.
+ * Nothing is checked out and no branch moves: git computes the result in its own storage.
+ */
+export function mergedTree(root: string, base: string, head: string): MergedTree {
+  const result = git(['merge-tree', '--write-tree', '--no-messages', base, head], root);
+  const firstLine = result.stdout.split('\n')[0]?.trim() ?? '';
+  const isTree = /^[0-9a-f]{40,64}$/.test(firstLine);
+  if (result.ok && isTree) return { kind: 'clean', tree: firstLine };
+  // With a conflict, git still prints a tree and then names the files that conflict.
+  if (!result.ok && isTree) return { kind: 'conflict' };
+  return { kind: 'error', message: result.stderr.trim().split('\n')[0] ?? 'git merge-tree failed' };
+}
+
+/** The names of the remotes of this repository, with the address of each. */
+export function remotes(root: string): { readonly name: string; readonly url: string }[] {
+  const result = git(['remote'], root);
+  if (!result.ok) return [];
+  return result.stdout
+    .split('\n')
+    .map((name) => name.trim())
+    .filter((name) => name !== '')
+    .map((name) => ({ name, url: git(['remote', 'get-url', name], root).stdout.trim() }));
+}
+
+/** The commit a branch points to on the remote right now, asked from the remote itself. */
+export function remoteBranchTip(root: string, remote: string, branch: string): string | undefined {
+  const result = git(['ls-remote', remote, `refs/heads/${branch}`], root);
+  if (!result.ok) return undefined;
+  const sha = result.stdout.trim().split(/\s+/)[0] ?? '';
+  return /^[0-9a-f]{40,64}$/.test(sha) ? sha : undefined;
+}
+
+/** Downloads what a ref of the remote points to. No local branch moves. */
+export function fetchRef(root: string, remote: string, ref: string): boolean {
+  return git(['fetch', '--quiet', '--no-tags', remote, ref], root).ok;
+}

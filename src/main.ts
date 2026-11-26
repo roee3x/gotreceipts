@@ -2,6 +2,7 @@ import { EXIT, type ExitCode } from './exit-codes.ts';
 import { gateCommand } from './gate/command.ts';
 import { hookCommand } from './hook/command.ts';
 import { doctorCommand, installCommand, uninstallCommand } from './install/command.ts';
+import { mergeCommand } from './merge/command.ts';
 import { policyCommand } from './policy/command.ts';
 import { readVersion } from './version.ts';
 import { verifyCommand } from './verify/command.ts';
@@ -21,6 +22,7 @@ export const USAGE = [
   '  gate             Run the checks of a gate level on the current commit',
   '  hook             The entry points git calls, such as before a push. Not run by hand',
   '  install          Put the git hook of this tool into this clone',
+  '  merge            Merge a pull request on GitHub, only when its commit has its record',
   '  policy           Check gotreceipts.json and show what the gate will do',
   '  uninstall        Remove the git hook again',
   '  verify           Say whether a commit has a record that satisfies a gate level',
@@ -91,6 +93,10 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
 
   if (command === 'doctor') {
     return doctorCommand(rest, io);
+  }
+
+  if (command === 'merge') {
+    return mergeCommand(rest, io);
   }
 
   io.err(`gotreceipts: unknown command "${command}".`);

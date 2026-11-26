@@ -107,7 +107,7 @@ export function printReport(io: Io, inspection: Inspection): boolean {
   io.out('');
   io.out('It does not stop:');
   io.out('  - "git push --no-verify". That option skips every git hook.');
-  io.out('  - A merge made on the server: the merge button, or "gh pr merge".');
+  io.out('  - A merge made on the server: the merge button, or a bare "gh pr merge". Use "gotreceipts merge" for pull requests.');
   io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
   io.out('  - A record that someone wrote by hand inside the .git folder.');
   io.out('');
