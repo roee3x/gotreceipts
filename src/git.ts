@@ -40,6 +40,14 @@ export function headCommit(root: string): string | undefined {
   return sha === '' ? undefined : sha;
 }
 
+/** The id of the file tree of the commit that is checked out. */
+export function headTree(root: string): string | undefined {
+  const result = git(['rev-parse', '--verify', '--quiet', 'HEAD^{tree}'], root);
+  if (!result.ok) return undefined;
+  const sha = result.stdout.trim();
+  return sha === '' ? undefined : sha;
+}
+
 /** The name of the branch that is checked out, or undefined when no branch is (a detached HEAD). */
 export function currentBranch(root: string): string | undefined {
   const result = git(['branch', '--show-current'], root);
