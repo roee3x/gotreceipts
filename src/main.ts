@@ -1,4 +1,5 @@
 import { EXIT, type ExitCode } from './exit-codes.ts';
+import { policyCommand } from './policy/command.ts';
 import { readVersion } from './version.ts';
 import { wordsCommand } from './words/command.ts';
 
@@ -12,6 +13,7 @@ export const USAGE = [
   'Usage: gotreceipts <command> [options]',
   '',
   'Commands:',
+  '  policy           Check gotreceipts.json and show what the gate will do',
   '  words            Fail if a file, a file path or a commit message contains a private word',
   '',
   'Options:',
@@ -51,6 +53,10 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
 
   if (command === 'words') {
     return wordsCommand(rest, io);
+  }
+
+  if (command === 'policy') {
+    return policyCommand(rest, io);
   }
 
   io.err(`gotreceipts: unknown command "${command}".`);
