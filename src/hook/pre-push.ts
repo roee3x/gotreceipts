@@ -1,11 +1,10 @@
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { headCommit } from '../git.ts';
 import type { Io } from '../main.ts';
-import { policyId } from '../policy/hash.ts';
 import { loadPolicy } from '../policy/load.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
-import { readRecords } from '../record/store.ts';
-import { decide, shownAge } from '../verify/decide.ts';
+import { shownAge } from '../verify/decide.ts';
+import { judgeCommit } from '../verify/judge.ts';
 
 /** What git writes in place of a commit id when there is none: a deleted or a new branch. */
 const NO_COMMIT = /^0+$/;
@@ -105,7 +104,6 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
   const toCheck = steps.filter((step) => step.kind === 'check');
   io.out(`gotreceipts pre-push: ${plural(toCheck.length, 'branch', 'branches')} to check`);
 
-  const id = policyId(policy);
   const head = headCommit(root);
   const advice: string[] = [];
   let refused = 0;
@@ -116,8 +114,7 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
       continue;
     }
     const shortCommit = step.commit.slice(0, 7);
-    const stored = readRecords(root, step.commit);
-    const decision = decide({ policy, policyId: id, requiredLevel: step.level, records: stored.records, now });
+    const { decision, unreadable } = judgeCommit(root, policy, step.commit, step.level, now);
     const subject = `  ${step.branch}: commit ${shortCommit} needs level ${step.level}`;
 
     if (decision.ok) {
@@ -129,7 +126,7 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
       const command = `gotreceipts gate --for ${step.branch}`;
       advice.push(step.commit === head ? `  ${command}` : `  ${command}   (with commit ${shortCommit} checked out)`);
     }
-    for (const file of stored.unreadable) io.out(`      ignored, not a valid record: ${file}`);
+    for (const file of unreadable) io.out(`      ignored, not a valid record: ${file}`);
   }
 
   if (refused === 0) {
