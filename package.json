@@ -1,6 +1,6 @@
 {
   "name": "gotreceipts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Merge gate for AI coding agents. No receipt, no merge.",
   "keywords": [
     "merge-gate",
