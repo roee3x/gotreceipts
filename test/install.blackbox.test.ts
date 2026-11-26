@@ -1,14 +1,22 @@
 // Outside-in tests for "gotreceipts install", "uninstall" and "doctor".
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { TestContext } from 'node:test';
 import { test } from 'node:test';
 
-import { addRemote, cliPath, gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import {
+  addRemote,
+  cliPath,
+  gitIn,
+  lastLine,
+  looseFiles,
+  noPersonalGitSettings,
+  runCli,
+  tempRepo,
+  writeIn,
+} from './helpers/temp-repo.ts';
 
 const POLICY = {
   schema: 1,
@@ -201,28 +209,14 @@ test('the Claude Code entry calls this tool before every shell command of the ag
   });
 });
 
-/**
- * An environment in which git reads no settings and no ignore list of the person running the
- * tests. Some machines ignore this settings file for every repository, and these tests are
- * about a machine that does not.
- */
-function noPersonalGitSettings(t: TestContext): Record<string, string> {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-gitconfig-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true }));
-  const empty = join(folder, 'gitconfig');
-  writeFileSync(empty, '');
-  return { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: folder };
-}
-
 test('the settings file holds a path of this machine, so it is kept out of git, and the folder stays clean', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const env = noPersonalGitSettings(t);
 
   const result = runCli(repo, ['install'], env);
-  assert.match(result.stdout, /It is now kept out of git through \.git\/info\/exclude/);
+  assert.match(result.stdout, /Claude Code hook: written into \S+\n.*It is now kept out of git through \.git\/info\/exclude/);
   assert.match(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.claude\/settings\.local\.json$/m);
-  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repo, encoding: 'utf8', env: { ...process.env, ...env } });
-  assert.equal(status.stdout, '');
+  assert.equal(looseFiles(repo, env), '');
   // The gate insists on a folder with no loose changes. Installing must not get in its way.
   assert.equal(runCli(repo, ['gate'], env).status, 0);
 
@@ -230,17 +224,17 @@ test('the settings file holds a path of this machine, so it is kept out of git, 
   assert.doesNotMatch(again.stdout, /kept out of git/, 'the line is added once');
 });
 
-test('when the repository already ignores the settings file, nothing more is added', (t) => {
+test('when the repository already ignores what install writes, nothing is added to the exclude file', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const env = noPersonalGitSettings(t);
-  writeIn(repo, '.gitignore', `${SETTINGS}\n`);
+  writeIn(repo, '.gitignore', '.claude/\n');
   gitIn(repo, 'add', '--all');
-  gitIn(repo, 'commit', '--quiet', '-m', 'test: ignore the local settings');
+  gitIn(repo, 'commit', '--quiet', '-m', 'test: ignore the agent folder');
 
   const result = runCli(repo, ['install'], env);
   assert.equal(result.status, 0);
   assert.doesNotMatch(result.stdout, /kept out of git/);
-  assert.doesNotMatch(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /settings\.local\.json/);
+  assert.doesNotMatch(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /\.claude/);
 });
 
 test('whatever else is in the settings file stays exactly as it was, through install and uninstall', (t) => {

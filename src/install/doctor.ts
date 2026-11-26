@@ -4,7 +4,8 @@ import type { Io } from '../main.ts';
 import type { Policy } from '../policy/policy.ts';
 import { readAgentState, SETTINGS_FILE } from './claude-code.ts';
 import { keptName } from './hook-script.ts';
-import { findHooksFolder, readHookState, type HookName } from './hooks.ts';
+import { currentLauncher, findHooksFolder, readHookState, type HookName } from './hooks.ts';
+import { readSkillState, SKILL_FILE, type SkillState } from './skill.ts';
 
 /** What was found about one git hook in this clone. */
 export type HookFinding =
@@ -31,6 +32,8 @@ export interface Inspection {
   readonly guarded: readonly string[];
   readonly prePush: HookFinding;
   readonly claudeCode: AgentFinding;
+  /** The skill explains the gate to the agent. It is reported, and it is no part of the verdict. */
+  readonly skill: SkillState;
 }
 
 function inspectHook(root: string, name: HookName): HookFinding {
@@ -60,6 +63,7 @@ export function inspect(root: string, policy: Policy): Inspection {
     guarded: policy.tiers.map((tier) => tier.branch),
     prePush: inspectHook(root, 'pre-push'),
     claudeCode: inspectAgent(root),
+    skill: readSkillState(root, currentLauncher()),
   };
 }
 
@@ -112,6 +116,21 @@ function agentLines(finding: AgentFinding): string[] {
   }
 }
 
+function skillLines(state: SkillState): string[] {
+  switch (state) {
+    case 'current':
+      return ['INSTALLED', 'it tells the agent how to work with the gate. It stops nothing'];
+    case 'outdated':
+      return ['OUT OF DATE: it is not the text this version of the tool writes', 'run "gotreceipts install" to write it again'];
+    case 'none':
+      return ['NOT INSTALLED'];
+    case 'foreign':
+      return [`NOT INSTALLED: another skill is at ${SKILL_FILE}, and it was not written by gotreceipts`];
+    case 'no-source':
+      return ['UNKNOWN: the skill that ships with the tool could not be read'];
+  }
+}
+
 /**
  * Prints what is enforced in this clone and, just as plainly, what is not.
  * Returns the parts that are not in place. An empty list means everything is.
@@ -133,6 +152,7 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   ]);
   row('git pre-push hook', hookLines(inspection.prePush));
   row('Claude Code hook', agentLines(inspection.claudeCode));
+  row('Claude Code skill', skillLines(inspection.skill));
 
   io.out('');
   io.out('This clone stops:');

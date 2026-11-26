@@ -28,7 +28,8 @@
     "gotreceipts": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
   "scripts": {
     "check": "tsc -p tsconfig.json",

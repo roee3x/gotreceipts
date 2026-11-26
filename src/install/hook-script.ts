@@ -28,6 +28,16 @@ function shellUnquote(quoted: string): string {
   return quoted.slice(1, -1).replace(/'\\''/g, "'");
 }
 
+/**
+ * How the tool is started by hand on this machine, as one line a shell or a person can use.
+ * Undefined when the path of the tool holds a character that would break out of the quotes.
+ */
+export function startLine(launcher: Launcher): string | undefined {
+  const cli = launcher.cli.replace(/\\/g, '/');
+  if (/["$`]/.test(cli)) return undefined;
+  return `node "${cli}"`;
+}
+
 /** True when the tool runs from a folder that will not stay, such as the one "npx" downloads into. */
 export function looksTemporary(cliPath: string): boolean {
   return /[\\/]_npx[\\/]/.test(cliPath);
