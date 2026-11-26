@@ -119,6 +119,30 @@ export function addRemote(t: TestContext, repo: string): string {
   return remote;
 }
 
+/**
+ * An environment in which git reads no settings and no ignore list of the person running the
+ * tests. Some machines ignore a file for every repository. A test about what git ignores must
+ * mean the same on every machine, so it runs with this.
+ */
+export function noPersonalGitSettings(t: TestContext): Record<string, string> {
+  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-gitconfig-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const empty = join(folder, 'gitconfig');
+  writeFileSync(empty, '');
+  return { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: folder };
+}
+
+/** What git lists as changed or new in `repo`, one file per line. Empty when the folder is clean. */
+export function looseFiles(repo: string, extraEnv: Record<string, string> = {}): string {
+  const result = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, ...extraEnv },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
 /** The last line of some output that is not empty. */
 export function lastLine(text: string): string {
   return text.trimEnd().split('\n').at(-1)?.trimEnd() ?? '';

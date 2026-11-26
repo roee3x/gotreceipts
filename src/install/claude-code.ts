@@ -1,8 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
-import { git } from '../git.ts';
-import type { Launcher } from './hook-script.ts';
+import { startLine, type Launcher } from './hook-script.ts';
+import { isCommitted, keepOutOfGit } from './local-file.ts';
 
 /**
  * The Claude Code side of the installation: one entry in the project's local settings file,
@@ -32,9 +32,8 @@ function isObject(value: unknown): value is Json {
  * a character that would break out of the quotes around it.
  */
 export function hookCommandLine(launcher: Launcher): string | undefined {
-  const cli = launcher.cli.replace(/\\/g, '/');
-  if (/["$`]/.test(cli)) return undefined;
-  return `node "${cli}" ${HOOK_WORDS}`;
+  const start = startLine(launcher);
+  return start === undefined ? undefined : `${start} ${HOOK_WORDS}`;
 }
 
 /** True for a hook entry that this tool wrote. */
@@ -122,25 +121,11 @@ export type AgentInstall =
   | { readonly outcome: 'tracked' }
   | { readonly outcome: 'unsafe-path' };
 
-/**
- * Makes sure git will not offer the settings file for a commit. When no ignore rule covers it,
- * a line is added to the repository's own exclude file, which is local and never committed.
- */
-function keepOutOfGit(root: string): boolean {
-  if (git(['check-ignore', '--quiet', '--', SETTINGS_FILE], root).ok) return false;
-  const path = git(['rev-parse', '--git-path', 'info/exclude'], root);
-  if (!path.ok || path.stdout.trim() === '') return false;
-  const exclude = resolve(root, path.stdout.trim());
-  mkdirSync(dirname(exclude), { recursive: true });
-  appendFileSync(exclude, `\n# Added by "gotreceipts install": this file holds paths of this machine.\n${SETTINGS_FILE}\n`);
-  return true;
-}
-
 /** Writes the hook entry into the local settings file. Everything else in the file stays as it is. */
 export function installAgentHook(root: string, launcher: Launcher): AgentInstall {
   const commandLine = hookCommandLine(launcher);
   if (commandLine === undefined) return { outcome: 'unsafe-path' };
-  if (git(['ls-files', '--error-unmatch', '--', SETTINGS_FILE], root).ok) return { outcome: 'tracked' };
+  if (isCommitted(root, SETTINGS_FILE)) return { outcome: 'tracked' };
 
   const path = join(root, SETTINGS_FILE);
   const read = readSettings(path);
@@ -149,7 +134,7 @@ export function installAgentHook(root: string, launcher: Launcher): AgentInstall
   const had = ourHandlers(read.settings).length > 0;
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(withOurs(read.settings, commandLine), null, 2)}\n`);
-  return { outcome: had ? 'updated' : 'written', newlyExcluded: keepOutOfGit(root) };
+  return { outcome: had ? 'updated' : 'written', newlyExcluded: keepOutOfGit(root, SETTINGS_FILE) };
 }
 
 export type AgentUninstall = 'removed' | 'not-installed' | 'unreadable';

@@ -1,5 +1,6 @@
 import { forbiddenCommand, guardMessage } from '../agent/guard.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
+import { startLine } from '../install/hook-script.ts';
 import { currentLauncher } from '../install/hooks.ts';
 import type { Io } from '../main.ts';
 
@@ -37,8 +38,7 @@ export function claudeCodeHook(input: string, io: Io): ExitCode {
   const rule = forbiddenCommand(command);
   if (rule === undefined) return EXIT.PASS;
 
-  const { cli } = currentLauncher();
-  const launcher = `node "${cli.replace(/\\/g, '/')}"`;
+  const launcher = startLine(currentLauncher()) ?? 'the command the user gives you';
   io.out(
     JSON.stringify({
       hookSpecificOutput: {

@@ -9,21 +9,27 @@ import { installAgentHook, SETTINGS_FILE, uninstallAgentHook } from './claude-co
 import { inspect, printReport, SHARED_HOOK_LINE } from './doctor.ts';
 import { keptName, looksTemporary, type Launcher } from './hook-script.ts';
 import { currentLauncher, findHooksFolder, installHook, uninstallHook } from './hooks.ts';
+import { installSkill, SKILL_FILE, uninstallSkill } from './skill.ts';
 
 export const INSTALL_USAGE = [
   'Usage: gotreceipts install',
   '',
-  'Puts the two hooks of this tool into this clone of the repository, and reports what is',
-  'enforced from then on and what is not.',
+  'Puts the two hooks of this tool and its skill into this clone of the repository, and',
+  'reports what is enforced from then on and what is not.',
   '',
   '  git pre-push hook   Before every push, each commit that would enter a branch with a gate',
   '                      level must have a valid record at that level.',
   '  Claude Code hook    Before the agent runs a shell command: a bare "gh pr merge" and',
   '                      "git push --no-verify" are stopped, and the agent is told what to run.',
+  '  Claude Code skill   A short text that tells the agent how to work with the gate: when to',
+  '                      run it, and how to read a refusal. It stops nothing.',
   '',
   'A git hook that is already there is never overwritten. It is kept under the name',
   'pre-push.local, and it runs first. "gotreceipts uninstall" puts it back.',
   `The Claude Code hook is one entry in ${SETTINGS_FILE}. The rest of that file is left as it is.`,
+  `The skill is the file ${SKILL_FILE}.`,
+  'Both files hold a path of this machine. They are kept out of git, through .git/info/exclude',
+  'when no ignore rule covers them.',
   '',
   'Hooks do not come with a clone. Run this once in every clone.',
   '',
@@ -33,9 +39,10 @@ export const INSTALL_USAGE = [
 export const UNINSTALL_USAGE = [
   'Usage: gotreceipts uninstall',
   '',
-  'Removes what "gotreceipts install" wrote: the git hook and the Claude Code hook entry.',
-  'A git hook that was kept aside is put back in its place. Anything this tool did not',
-  'write is never touched.',
+  'Removes what "gotreceipts install" wrote: the git hook, the Claude Code hook entry and',
+  'the skill. A git hook that was kept aside is put back in its place. Anything this tool',
+  'did not write is never touched. Lines it added to .git/info/exclude stay: they name',
+  'files that are gone, and do nothing.',
   '',
   'Exit codes: 0 = no hook of this tool is left, 1 = something could not be removed, 2 = the command could not run.',
 ].join('\n');
@@ -150,6 +157,32 @@ function installAgentPart(root: string, launcher: Launcher): string[] {
   }
 }
 
+/** Installs the skill and returns the lines that say what happened. */
+function installSkillPart(root: string, launcher: Launcher): string[] {
+  const result = installSkill(root, launcher);
+  switch (result.outcome) {
+    case 'written':
+    case 'updated': {
+      const lines = [
+        result.outcome === 'written'
+          ? `Claude Code skill: written into ${SKILL_FILE}`
+          : `Claude Code skill: was already in ${SKILL_FILE}, written again`,
+      ];
+      if (result.newlyExcluded) lines.push('  That file holds a path of this machine. It is now kept out of git through .git/info/exclude.');
+      return lines;
+    }
+    case 'foreign':
+      return [`Claude Code skill: NOT WRITTEN: another skill is at ${SKILL_FILE}, and this tool did not write it. It was left as it is.`];
+    case 'tracked':
+      return [
+        `Claude Code skill: NOT WRITTEN: ${SKILL_FILE} is committed in this repository.`,
+        '  The skill this tool writes holds a path of this machine, which does not belong in a committed file.',
+      ];
+    case 'no-source':
+      return ['Claude Code skill: NOT WRITTEN: the skill that ships with the tool could not be read.'];
+  }
+}
+
 export async function installCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   // A policy is needed first: without one, the git hook would block every push.
   const setup = setUp('install', INSTALL_USAGE, args, io);
@@ -167,7 +200,9 @@ export async function installCommand(args: readonly string[], io: Io): Promise<E
   }
 
   io.out('gotreceipts install:');
-  for (const line of [...installGitPart(root, launcher), ...installAgentPart(root, launcher)]) io.out(`  ${line}`);
+  for (const line of [...installGitPart(root, launcher), ...installAgentPart(root, launcher), ...installSkillPart(root, launcher)]) {
+    io.out(`  ${line}`);
+  }
   io.out('');
   return verdict(io, printReport(io, inspect(root, policy)));
 }
@@ -209,6 +244,13 @@ export async function uninstallCommand(args: readonly string[], io: Io): Promise
   } else {
     io.out(`  Claude Code hook: ${agent === 'removed' ? `removed from ${SETTINGS_FILE}` : 'was not installed, nothing to remove'}`);
   }
+
+  const skillSaid = {
+    removed: `removed from ${SKILL_FILE}`,
+    'not-installed': 'was not installed, nothing to remove',
+    'not-ours': 'a skill is there that this tool did not write. It was left as it is',
+  }[uninstallSkill(root)];
+  io.out(`  Claude Code skill: ${skillSaid}`);
 
   if (failed) return EXIT.REFUSED;
   io.out('From now on, nothing in this clone is checked by this tool.');
