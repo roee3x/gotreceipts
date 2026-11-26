@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "levels": [
+    {
+      "name": "G0",
+      "checks": [
+        { "name": "types", "run": "npm run check", "timeoutMinutes": 5 },
+        { "name": "build", "run": "npm run build", "timeoutMinutes": 5 },
+        {
+          "name": "tests",
+          "run": "npm test",
+          "timeoutMinutes": 10,
+          "expect": { "count": { "pattern": "run-tests: (\\d+) ran, 0 failed", "atLeast": 100 } }
+        }
+      ]
+    },
+    {
+      "name": "G1",
+      "checks": [
+        {
+          "name": "package",
+          "run": "npm run smoke",
+          "timeoutMinutes": 5,
+          "expect": { "output": "^pack-smoke: PASS" }
+        }
+      ]
+    },
+    {
+      "name": "G2",
+      "checks": [
+        {
+          "name": "private-words",
+          "run": "node dist/cli.js words",
+          "timeoutMinutes": 2,
+          "expect": { "output": "^VERDICT: PASS$" }
+        }
+      ]
+    }
+  ],
+  "tiers": [
+    { "branch": "main", "level": "G2" },
+    { "branch": "develop", "level": "G2" },
+    { "branch": "version/*", "level": "G1" },
+    { "branch": "feature/*", "level": "G0" },
+    { "branch": "bug/*", "level": "G0" }
+  ],
+  "record": { "maxAgeHours": 24 }
+}
