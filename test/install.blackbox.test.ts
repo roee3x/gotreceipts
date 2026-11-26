@@ -1,12 +1,14 @@
 // Outside-in tests for "gotreceipts install", "uninstall" and "doctor".
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { TestContext } from 'node:test';
 import { test } from 'node:test';
 
-import { addRemote, gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { addRemote, cliPath, gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
 
 const POLICY = {
   schema: 1,
@@ -14,8 +16,19 @@ const POLICY = {
   tiers: [{ branch: 'feature/*', level: 'G0' }],
 };
 
+const ALL_IN_PLACE = 'VERDICT: PASS (the push hook and the Claude Code hook are in place)';
+const SETTINGS = '.claude/settings.local.json';
+
 function hookPath(repo: string, name = 'pre-push'): string {
   return join(repo, '.git', 'hooks', name);
+}
+
+function settingsPath(repo: string): string {
+  return join(repo, '.claude', 'settings.local.json');
+}
+
+function readSettings(repo: string): Record<string, any> {
+  return JSON.parse(readFileSync(settingsPath(repo), 'utf8')) as Record<string, any>;
 }
 
 /** Writes a hook the way a person or another tool would, before this tool arrives. */
@@ -28,33 +41,38 @@ function remoteHas(remote: string, branch: string): boolean {
   return gitIn(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).status === 0;
 }
 
-// --- install ---
+// --- install: the git hook ---
 
-test('install writes the hook and reports what is enforced and what is not', (t) => {
+test('install writes both hooks and reports what is enforced and what is not', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
 
   const result = runCli(repo, ['install']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /gotreceipts install: done\./);
-  assert.match(result.stdout, /pre-push hook: written/);
+  assert.match(result.stdout, /^gotreceipts install:$/m);
+  assert.match(result.stdout, /git pre-push hook: written/);
+  assert.match(result.stdout, /Claude Code hook: written into \.claude\/settings\.local\.json/);
   assert.match(result.stdout, /policy file\s+OK: 1 level, and a level is set for feature\/\*/);
   assert.match(result.stdout, /git pre-push hook\s+INSTALLED/);
+  assert.match(result.stdout, /Claude Code hook\s+INSTALLED/);
   assert.match(result.stdout, /This clone stops:\n {2}- "git push" of a commit that has no valid record/);
-  assert.match(result.stdout, /It does not stop:\n {2}- "git push --no-verify"/);
-  assert.match(result.stdout, /A merge made on the server/);
-  assert.equal(lastLine(result.stdout), 'VERDICT: PASS (the push hook is in place)');
+  assert.match(result.stdout, /- Claude Code running a bare "gh pr merge"/);
+  assert.match(result.stdout, /It does not stop:\n {2}- "git push --no-verify" typed by a person/);
+  assert.match(result.stdout, /The merge button on GitHub/);
+  assert.equal(lastLine(result.stdout), ALL_IN_PLACE);
 
   assert.match(readFileSync(hookPath(repo), 'utf8'), /^# gotreceipts:managed-hook pre-push$/m);
 });
 
-test('installing twice is safe: the hook is written again and nothing is kept aside', (t) => {
+test('installing twice is safe: both are written again and nothing is doubled', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   assert.equal(runCli(repo, ['install']).status, 0);
 
   const again = runCli(repo, ['install']);
   assert.equal(again.status, 0);
-  assert.match(again.stdout, /pre-push hook: was already there, written again/);
+  assert.match(again.stdout, /git pre-push hook: was already there, written again/);
+  assert.match(again.stdout, /Claude Code hook: was already in \.claude\/settings\.local\.json, written again/);
   assert.equal(existsSync(hookPath(repo, 'pre-push.local')), false);
+  assert.equal(readSettings(repo)['hooks'].PreToolUse.length, 1);
 });
 
 test('the installed hook stops a real push without a record, and lets one with a record through', (t) => {
@@ -106,27 +124,27 @@ test('when the older hook says no, the push stops there, record or not', (t) => 
   assert.equal(remoteHas(remote, 'feature/thing'), false);
 });
 
-test('with two older hooks in the way, install changes nothing and says why', (t) => {
+test('with two older hooks in the way, the git hook is not written and both are left alone', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   writeForeignHook(repo, 'echo first');
   writeForeignHook(repo, 'echo second', 'pre-push.local');
 
   const result = runCli(repo, ['install']);
   assert.equal(result.status, 1);
-  assert.match(result.stdout, /REFUSED: a pre-push hook that this tool did not write is there, and so is pre-push\.local/);
-  assert.equal(lastLine(result.stdout), 'Nothing was changed.');
+  assert.match(result.stdout, /git pre-push hook: NOT WRITTEN: a pre-push hook that this tool did not write is there, and so is pre-push\.local/);
+  assert.equal(lastLine(result.stdout), 'VERDICT: NOT PROTECTED (not in place: the push hook)');
   assert.match(readFileSync(hookPath(repo), 'utf8'), /echo first/);
   assert.match(readFileSync(hookPath(repo, 'pre-push.local'), 'utf8'), /echo second/);
 });
 
-test('when git reads hooks from another folder, install writes nothing and gives the line to add', (t) => {
+test('when git reads hooks from another folder, no git hook is written and the line to add is given', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   assert.equal(gitIn(repo, 'config', 'core.hooksPath', '.shared-hooks').status, 0);
 
   const result = runCli(repo, ['install']);
   assert.equal(result.status, 1);
-  assert.match(result.stdout, /REFUSED: git looks for hooks in "\.shared-hooks" \(the setting core\.hooksPath\)/);
-  assert.match(result.stdout, /^ {2}gotreceipts hook pre-push "\$@"$/m);
+  assert.match(result.stdout, /git pre-push hook: NOT WRITTEN: git looks for hooks in "\.shared-hooks" \(the setting core\.hooksPath\)/);
+  assert.match(result.stdout, /^ +gotreceipts hook pre-push "\$@"$/m);
   assert.equal(existsSync(hookPath(repo)), false);
 
   const doctor = runCli(repo, ['doctor']);
@@ -134,12 +152,13 @@ test('when git reads hooks from another folder, install writes nothing and gives
   assert.match(doctor.stdout, /NOT INSTALLED: git looks for hooks in "\.shared-hooks"/);
 });
 
-test('install needs a policy first, because the hook would block every push without one', (t) => {
+test('install needs a policy first, because the git hook would block every push without one', (t) => {
   const repo = tempRepo(t);
   const result = runCli(repo, ['install']);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /gotreceipts install: CANNOT RUN: no policy file at/);
   assert.equal(existsSync(hookPath(repo)), false);
+  assert.equal(existsSync(settingsPath(repo)), false);
 });
 
 test('outside a git repository the three commands cannot run', (t) => {
@@ -161,20 +180,136 @@ test('each command explains itself, and refuses an option it does not know', (t)
     assert.equal(runCli(repo, [command, '--force']).status, 2, command);
   }
   assert.equal(existsSync(hookPath(repo)), false, 'asking for help installs nothing');
+  assert.equal(existsSync(settingsPath(repo)), false, 'asking for help installs nothing');
+});
+
+// --- install: the Claude Code hook ---
+
+test('the Claude Code entry calls this tool before every shell command of the agent', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  assert.equal(runCli(repo, ['install']).status, 0);
+
+  assert.deepEqual(readSettings(repo), {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash|PowerShell',
+          hooks: [{ type: 'command', command: `node "${cliPath.replace(/\\/g, '/')}" hook claude-code`, timeout: 10 }],
+        },
+      ],
+    },
+  });
+});
+
+/**
+ * An environment in which git reads no settings and no ignore list of the person running the
+ * tests. Some machines ignore this settings file for every repository, and these tests are
+ * about a machine that does not.
+ */
+function noPersonalGitSettings(t: TestContext): Record<string, string> {
+  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-gitconfig-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const empty = join(folder, 'gitconfig');
+  writeFileSync(empty, '');
+  return { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: folder };
+}
+
+test('the settings file holds a path of this machine, so it is kept out of git, and the folder stays clean', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  const env = noPersonalGitSettings(t);
+
+  const result = runCli(repo, ['install'], env);
+  assert.match(result.stdout, /It is now kept out of git through \.git\/info\/exclude/);
+  assert.match(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.claude\/settings\.local\.json$/m);
+  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repo, encoding: 'utf8', env: { ...process.env, ...env } });
+  assert.equal(status.stdout, '');
+  // The gate insists on a folder with no loose changes. Installing must not get in its way.
+  assert.equal(runCli(repo, ['gate'], env).status, 0);
+
+  const again = runCli(repo, ['install'], env);
+  assert.doesNotMatch(again.stdout, /kept out of git/, 'the line is added once');
+});
+
+test('when the repository already ignores the settings file, nothing more is added', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  const env = noPersonalGitSettings(t);
+  writeIn(repo, '.gitignore', `${SETTINGS}\n`);
+  gitIn(repo, 'add', '--all');
+  gitIn(repo, 'commit', '--quiet', '-m', 'test: ignore the local settings');
+
+  const result = runCli(repo, ['install'], env);
+  assert.equal(result.status, 0);
+  assert.doesNotMatch(result.stdout, /kept out of git/);
+  assert.doesNotMatch(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /settings\.local\.json/);
+});
+
+test('whatever else is in the settings file stays exactly as it was, through install and uninstall', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  const before = {
+    permissions: { allow: ['Bash(npm test)'] },
+    hooks: {
+      PreToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'echo someone-else' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'echo done' }] }],
+    },
+  };
+  writeIn(repo, SETTINGS, JSON.stringify(before));
+
+  assert.equal(runCli(repo, ['install']).status, 0);
+  assert.equal(runCli(repo, ['install']).status, 0);
+  const installed = readSettings(repo);
+  assert.deepEqual(installed['permissions'], before.permissions);
+  assert.deepEqual(installed['hooks'].Stop, before.hooks.Stop);
+  assert.deepEqual(installed['hooks'].PreToolUse[0], before.hooks.PreToolUse[0]);
+  assert.equal(installed['hooks'].PreToolUse.length, 2, 'one entry of someone else, one of this tool');
+
+  assert.equal(runCli(repo, ['uninstall']).status, 0);
+  assert.deepEqual(readSettings(repo), before);
+});
+
+test('a settings file that is not valid JSON is not touched', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  writeIn(repo, SETTINGS, '{ "permissions": ');
+
+  const install = runCli(repo, ['install']);
+  assert.equal(install.status, 1);
+  assert.match(install.stdout, /Claude Code hook: NOT WRITTEN: \.claude\/settings\.local\.json could not be read: it is not valid JSON/);
+  assert.match(install.stdout, /Claude Code hook\s+UNKNOWN: \.claude\/settings\.local\.json could not be read/);
+  assert.equal(lastLine(install.stdout), 'VERDICT: NOT PROTECTED (not in place: the Claude Code hook)');
+  assert.equal(readFileSync(settingsPath(repo), 'utf8'), '{ "permissions": ');
+
+  const uninstall = runCli(repo, ['uninstall']);
+  assert.equal(uninstall.status, 1);
+  assert.match(uninstall.stdout, /Claude Code hook: NOT REMOVED/);
+  assert.equal(readFileSync(settingsPath(repo), 'utf8'), '{ "permissions": ');
+});
+
+test('a settings file that is committed is not written to', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  writeIn(repo, SETTINGS, '{}\n');
+  // Forced, because some machines ignore this file for every repository.
+  assert.equal(gitIn(repo, 'add', '--force', SETTINGS).status, 0);
+  assert.equal(gitIn(repo, 'commit', '--quiet', '-m', 'test: someone committed the local settings').status, 0);
+
+  const result = runCli(repo, ['install']);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Claude Code hook: NOT WRITTEN: \.claude\/settings\.local\.json is committed in this repository/);
+  assert.equal(readFileSync(settingsPath(repo), 'utf8'), '{}\n');
 });
 
 // --- uninstall ---
 
-test('uninstall removes the hook, and a push is no longer checked', (t) => {
+test('uninstall removes both hooks, and a push is no longer checked', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const remote = addRemote(t, repo);
   assert.equal(runCli(repo, ['install']).status, 0);
 
   const result = runCli(repo, ['uninstall']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /pre-push hook: removed/);
-  assert.equal(lastLine(result.stdout), 'From now on, a push from this clone is not checked.');
+  assert.match(result.stdout, /git pre-push hook: removed/);
+  assert.match(result.stdout, /Claude Code hook: removed from \.claude\/settings\.local\.json/);
+  assert.equal(lastLine(result.stdout), 'From now on, nothing in this clone is checked by this tool.');
   assert.equal(existsSync(hookPath(repo)), false);
+  assert.equal(existsSync(settingsPath(repo)), false, 'a settings file that only held this entry is removed');
 
   assert.equal(gitIn(repo, 'push', 'origin', 'feature/thing').status, 0);
   assert.equal(remoteHas(remote, 'feature/thing'), true);
@@ -205,7 +340,9 @@ test('uninstall never touches a hook this tool did not write', (t) => {
 
 test('uninstall with nothing installed says so, and works even when the policy is gone', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
-  assert.match(runCli(repo, ['uninstall']).stdout, /was not installed, nothing to remove/);
+  const nothing = runCli(repo, ['uninstall']);
+  assert.match(nothing.stdout, /git pre-push hook: was not installed, nothing to remove/);
+  assert.match(nothing.stdout, /Claude Code hook: was not installed, nothing to remove/);
 
   assert.equal(runCli(repo, ['install']).status, 0);
   rmSync(join(repo, 'gotreceipts.json'));
@@ -222,20 +359,22 @@ test('doctor says "not protected" before install, and "pass" after', (t) => {
   const before = runCli(repo, ['doctor']);
   assert.equal(before.status, 1);
   assert.match(before.stdout, /git pre-push hook\s+NOT INSTALLED/);
+  assert.match(before.stdout, /Claude Code hook\s+NOT INSTALLED/);
   assert.match(before.stdout, /This clone stops:\n {2}- Nothing\. No hook of this tool is in place\./);
-  assert.match(before.stdout, /VERDICT: NOT PROTECTED \(the push hook is not in place\)/);
-  assert.equal(lastLine(before.stdout), 'To put the hook in place: gotreceipts install');
+  assert.match(before.stdout, /VERDICT: NOT PROTECTED \(not in place: the push hook, the Claude Code hook\)/);
+  assert.equal(lastLine(before.stdout), 'To put the hooks in place: gotreceipts install');
 
   assert.equal(runCli(repo, ['install']).status, 0);
   const after = runCli(repo, ['doctor']);
   assert.equal(after.status, 0);
-  assert.equal(lastLine(after.stdout), 'VERDICT: PASS (the push hook is in place)');
+  assert.equal(lastLine(after.stdout), ALL_IN_PLACE);
 });
 
 test('doctor changes nothing', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   runCli(repo, ['doctor']);
   assert.equal(existsSync(hookPath(repo)), false);
+  assert.equal(existsSync(settingsPath(repo)), false);
 });
 
 test('doctor names a hook of another origin as not installed', (t) => {
@@ -246,27 +385,44 @@ test('doctor names a hook of another origin as not installed', (t) => {
   assert.match(result.stdout, /NOT INSTALLED: another pre-push hook is there, and it was not written by gotreceipts/);
 });
 
-test('when the tool has moved away, doctor says the hook is broken and the hook blocks the push', (t) => {
+test('doctor says which of the two hooks is missing', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  assert.equal(runCli(repo, ['install']).status, 0);
+  rmSync(settingsPath(repo));
+
+  const result = runCli(repo, ['doctor']);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /git pre-push hook\s+INSTALLED/);
+  assert.match(result.stdout, /Claude Code hook\s+NOT INSTALLED/);
+  assert.match(result.stdout, /VERDICT: NOT PROTECTED \(not in place: the Claude Code hook\)/);
+});
+
+test('when the tool has moved away, doctor says so, the git hook blocks the push, and install repairs both', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const remote = addRemote(t, repo);
   assert.equal(runCli(repo, ['install']).status, 0);
   assert.equal(runCli(repo, ['gate']).status, 0);
 
-  // The same as moving or deleting the tool after the hook was installed.
+  // The same as moving or deleting the tool after the hooks were installed.
   const moved = readFileSync(hookPath(repo), 'utf8').replace(/^cli='.*'$/m, "cli='/no/such/place/cli.js'");
   writeFileSync(hookPath(repo), moved);
+  const settings = readSettings(repo);
+  settings['hooks'].PreToolUse[0].hooks[0].command = 'node "/no/such/place/cli.js" hook claude-code';
+  writeFileSync(settingsPath(repo), JSON.stringify(settings));
 
   const doctor = runCli(repo, ['doctor']);
   assert.equal(doctor.status, 1);
   assert.match(doctor.stdout, /BROKEN: the hook calls a tool that is no longer there \(\/no\/such\/place\/cli\.js\)/);
+  assert.match(doctor.stdout, /BROKEN: the entry calls a tool that is no longer there \(\/no\/such\/place\/cli\.js\)/);
   assert.match(doctor.stdout, /This clone stops:\n {2}- Every "git push", because the hook cannot find its tool\./);
 
   const push = gitIn(repo, 'push', 'origin', 'feature/thing');
-  assert.notEqual(push.status, 0, 'a hook that cannot check must block, even with a valid record');
+  assert.notEqual(push.status, 0, 'a git hook that cannot check must block, even with a valid record');
   assert.match(push.stderr, /CANNOT CHECK: the tool is no longer at \/no\/such\/place\/cli\.js/);
   assert.equal(remoteHas(remote, 'feature/thing'), false);
 
-  // Installing again repairs it.
+  // Installing again repairs both.
   assert.equal(runCli(repo, ['install']).status, 0);
+  assert.equal(runCli(repo, ['doctor']).status, 0);
   assert.equal(gitIn(repo, 'push', 'origin', 'feature/thing').status, 0);
 });

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 
 import type { Io } from '../main.ts';
 import type { Policy } from '../policy/policy.ts';
+import { readAgentState, SETTINGS_FILE } from './claude-code.ts';
 import { keptName } from './hook-script.ts';
 import { findHooksFolder, readHookState, type HookName } from './hooks.ts';
 
@@ -17,11 +18,19 @@ export type HookFinding =
   | { readonly state: 'custom-folder'; readonly setting: string }
   | { readonly state: 'unknown' };
 
+/** What was found about the Claude Code hook in this clone. */
+export type AgentFinding =
+  | { readonly state: 'installed' }
+  | { readonly state: 'broken'; readonly cli: string | undefined }
+  | { readonly state: 'missing' }
+  | { readonly state: 'unreadable'; readonly reason: string };
+
 export interface Inspection {
   readonly levels: number;
   /** The branch patterns the policy sets a level for. */
   readonly guarded: readonly string[];
   readonly prePush: HookFinding;
+  readonly claudeCode: AgentFinding;
 }
 
 function inspectHook(root: string, name: HookName): HookFinding {
@@ -36,12 +45,21 @@ function inspectHook(root: string, name: HookName): HookFinding {
   return { state: 'installed', keptOlder: state.keptOlder };
 }
 
+function inspectAgent(root: string): AgentFinding {
+  const state = readAgentState(root);
+  if (state.kind === 'none') return { state: 'missing' };
+  if (state.kind === 'unreadable') return { state: 'unreadable', reason: state.reason };
+  if (state.cli === undefined || !existsSync(state.cli)) return { state: 'broken', cli: state.cli };
+  return { state: 'installed' };
+}
+
 /** Looks at this clone and says what is in place. It changes nothing. */
 export function inspect(root: string, policy: Policy): Inspection {
   return {
     levels: policy.levels.length,
     guarded: policy.tiers.map((tier) => tier.branch),
     prePush: inspectHook(root, 'pre-push'),
+    claudeCode: inspectAgent(root),
   };
 }
 
@@ -76,41 +94,67 @@ function hookLines(finding: HookFinding): string[] {
   }
 }
 
+function agentLines(finding: AgentFinding): string[] {
+  switch (finding.state) {
+    case 'installed':
+      return ['INSTALLED'];
+    case 'broken':
+      return [
+        finding.cli === undefined
+          ? 'BROKEN: the entry does not say which tool it calls'
+          : `BROKEN: the entry calls a tool that is no longer there (${finding.cli})`,
+        'the agent is not stopped until "gotreceipts install" is run again',
+      ];
+    case 'missing':
+      return ['NOT INSTALLED'];
+    case 'unreadable':
+      return [`UNKNOWN: ${SETTINGS_FILE} could not be read: ${finding.reason}`];
+  }
+}
+
 /**
  * Prints what is enforced in this clone and, just as plainly, what is not.
- * Returns true when the push hook is in place and working.
+ * Returns the parts that are not in place. An empty list means everything is.
  */
-export function printReport(io: Io, inspection: Inspection): boolean {
+export function printReport(io: Io, inspection: Inspection): string[] {
   const label = (text: string): string => `  ${text.padEnd(20)}`;
   const blank = ' '.repeat(22);
-  const protectedNow = inspection.prePush.state === 'installed';
+  const row = (name: string, lines: readonly string[]): void => {
+    io.out(`${label(name)}${lines[0] ?? ''}`);
+    for (const line of lines.slice(1)) io.out(`${blank}${line}`);
+  };
+  const pushHook = inspection.prePush.state === 'installed';
+  const agentHook = inspection.claudeCode.state === 'installed';
 
-  io.out(
-    `${label('policy file')}OK: ${inspection.levels} ${inspection.levels === 1 ? 'level' : 'levels'}, and a level is set for ${
+  row('policy file', [
+    `OK: ${inspection.levels} ${inspection.levels === 1 ? 'level' : 'levels'}, and a level is set for ${
       inspection.guarded.length === 0 ? 'no branch' : inspection.guarded.join(', ')
     }`,
-  );
-  const [first, ...rest] = hookLines(inspection.prePush);
-  io.out(`${label('git pre-push hook')}${first ?? ''}`);
-  for (const line of rest) io.out(`${blank}${line}`);
+  ]);
+  row('git pre-push hook', hookLines(inspection.prePush));
+  row('Claude Code hook', agentLines(inspection.claudeCode));
 
   io.out('');
   io.out('This clone stops:');
-  if (protectedNow) {
-    io.out('  - "git push" of a commit that has no valid record, into a branch with a level.');
-  } else if (inspection.prePush.state === 'broken') {
-    io.out('  - Every "git push", because the hook cannot find its tool.');
-  } else {
-    io.out('  - Nothing. No hook of this tool is in place.');
+  if (pushHook) io.out('  - "git push" of a commit that has no valid record, into a branch with a level.');
+  if (inspection.prePush.state === 'broken') io.out('  - Every "git push", because the hook cannot find its tool.');
+  if (agentHook) {
+    io.out('  - Claude Code running a bare "gh pr merge", the same merge through "gh api", or "git push --no-verify".');
+    io.out('    It is told to use "gotreceipts merge", which checks the record first.');
   }
+  if (!pushHook && !agentHook && inspection.prePush.state !== 'broken') io.out('  - Nothing. No hook of this tool is in place.');
 
   io.out('');
   io.out('It does not stop:');
-  io.out('  - "git push --no-verify". That option skips every git hook.');
-  io.out('  - A merge made on the server: the merge button, or a bare "gh pr merge". Use "gotreceipts merge" for pull requests.');
+  io.out('  - "git push --no-verify" typed by a person. That option skips every git hook.');
+  io.out('  - The merge button on GitHub, or a merge by a command the agent hook does not know: a script, an alias, another tool.');
+  io.out('  - Another coding agent than Claude Code, and Claude Code itself when its hook cannot run. That hook is early feedback, not a lock.');
   io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
   io.out('  - A record that someone wrote by hand inside the .git folder.');
   io.out('');
 
-  return protectedNow;
+  const missing: string[] = [];
+  if (!pushHook) missing.push('the push hook');
+  if (!agentHook) missing.push('the Claude Code hook');
+  return missing;
 }
