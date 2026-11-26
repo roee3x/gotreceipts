@@ -5,34 +5,39 @@ import { repoRoot } from '../git.ts';
 import type { Io } from '../main.ts';
 import { loadPolicy } from '../policy/load.ts';
 import type { Policy } from '../policy/policy.ts';
+import { installAgentHook, SETTINGS_FILE, uninstallAgentHook } from './claude-code.ts';
 import { inspect, printReport, SHARED_HOOK_LINE } from './doctor.ts';
-import { keptName, looksTemporary } from './hook-script.ts';
+import { keptName, looksTemporary, type Launcher } from './hook-script.ts';
 import { currentLauncher, findHooksFolder, installHook, uninstallHook } from './hooks.ts';
 
 export const INSTALL_USAGE = [
   'Usage: gotreceipts install',
   '',
-  'Puts the git hook of this tool into this clone of the repository, and reports what is',
+  'Puts the two hooks of this tool into this clone of the repository, and reports what is',
   'enforced from then on and what is not.',
   '',
-  '  pre-push    Before every push, each commit that would enter a branch with a gate level',
-  '              must have a valid record at that level.',
+  '  git pre-push hook   Before every push, each commit that would enter a branch with a gate',
+  '                      level must have a valid record at that level.',
+  '  Claude Code hook    Before the agent runs a shell command: a bare "gh pr merge" and',
+  '                      "git push --no-verify" are stopped, and the agent is told what to run.',
   '',
-  'A hook that is already there is never overwritten. It is kept under the name',
+  'A git hook that is already there is never overwritten. It is kept under the name',
   'pre-push.local, and it runs first. "gotreceipts uninstall" puts it back.',
+  `The Claude Code hook is one entry in ${SETTINGS_FILE}. The rest of that file is left as it is.`,
   '',
   'Hooks do not come with a clone. Run this once in every clone.',
   '',
-  'Exit codes: 0 = the hook is in place, 1 = it was not installed, 2 = the command could not run.',
+  'Exit codes: 0 = both hooks are in place, 1 = not both, 2 = the command could not run.',
 ].join('\n');
 
 export const UNINSTALL_USAGE = [
   'Usage: gotreceipts uninstall',
   '',
-  'Removes the git hook that "gotreceipts install" wrote, and puts a hook that was kept',
-  'aside back in its place. A hook that this tool did not write is never touched.',
+  'Removes what "gotreceipts install" wrote: the git hook and the Claude Code hook entry.',
+  'A git hook that was kept aside is put back in its place. Anything this tool did not',
+  'write is never touched.',
   '',
-  'Exit codes: 0 = no hook of this tool is left, 2 = the command could not run.',
+  'Exit codes: 0 = no hook of this tool is left, 1 = something could not be removed, 2 = the command could not run.',
 ].join('\n');
 
 export const DOCTOR_USAGE = [
@@ -41,7 +46,7 @@ export const DOCTOR_USAGE = [
   'Reports what is enforced in this clone of the repository, and what is not.',
   'It changes nothing.',
   '',
-  'Exit codes: 0 = the push hook is in place, 1 = it is not, 2 = the command could not run.',
+  'Exit codes: 0 = both hooks are in place, 1 = not both, 2 = the command could not run.',
 ].join('\n');
 
 type Setup = { readonly ok: true; readonly policy: Policy; readonly root: string } | { readonly ok: false; readonly code: ExitCode };
@@ -81,67 +86,88 @@ function setUp(command: string, usage: string, args: readonly string[], io: Io):
   return { ok: true, policy: loaded.policy, root: loaded.root };
 }
 
-function verdict(io: Io, protectedNow: boolean): ExitCode {
-  if (protectedNow) {
-    io.out('VERDICT: PASS (the push hook is in place)');
+function verdict(io: Io, missing: readonly string[]): ExitCode {
+  if (missing.length === 0) {
+    io.out('VERDICT: PASS (the push hook and the Claude Code hook are in place)');
     return EXIT.PASS;
   }
-  io.out('VERDICT: NOT PROTECTED (the push hook is not in place)');
+  io.out(`VERDICT: NOT PROTECTED (not in place: ${missing.join(', ')})`);
   return EXIT.REFUSED;
 }
 
+/** Installs the git hook and returns the lines that say what happened. */
+function installGitPart(root: string, launcher: Launcher): string[] {
+  const place = findHooksFolder(root);
+  if (place.kind === 'unknown') return ['git pre-push hook: NOT WRITTEN: git could not say where its hooks folder is'];
+  if (place.kind === 'custom') {
+    return [
+      `git pre-push hook: NOT WRITTEN: git looks for hooks in "${place.setting}" (the setting core.hooksPath).`,
+      '  Such a folder is usually committed, and a hook written here holds paths of this machine.',
+      '  Add this line to the pre-push hook in that folder instead:',
+      `    ${SHARED_HOOK_LINE}`,
+    ];
+  }
+  switch (installHook(place.folder, 'pre-push', launcher)) {
+    case 'written':
+      return ['git pre-push hook: written'];
+    case 'updated':
+      return ['git pre-push hook: was already there, written again'];
+    case 'written-after-keeping-older':
+      return [`git pre-push hook: written. The hook that was there is kept as ${keptName('pre-push')} and runs first`];
+    case 'blocked-by-two-older-hooks':
+      return [
+        `git pre-push hook: NOT WRITTEN: a pre-push hook that this tool did not write is there, and so is ${keptName('pre-push')}.`,
+        '  One of them has to go before the tool can keep the other. Merge the two by hand,',
+        '  then run "gotreceipts install" again.',
+      ];
+  }
+}
+
+/** Installs the Claude Code hook entry and returns the lines that say what happened. */
+function installAgentPart(root: string, launcher: Launcher): string[] {
+  const result = installAgentHook(root, launcher);
+  switch (result.outcome) {
+    case 'written':
+    case 'updated': {
+      const lines = [
+        result.outcome === 'written'
+          ? `Claude Code hook: written into ${SETTINGS_FILE}`
+          : `Claude Code hook: was already in ${SETTINGS_FILE}, written again`,
+      ];
+      if (result.newlyExcluded) lines.push('  That file holds paths of this machine. It is now kept out of git through .git/info/exclude.');
+      lines.push('  Claude Code reads its hooks when a session starts, so start a new session.');
+      return lines;
+    }
+    case 'unreadable':
+      return [`Claude Code hook: NOT WRITTEN: ${SETTINGS_FILE} could not be read: ${result.reason}. Nothing in it was changed.`];
+    case 'tracked':
+      return [
+        `Claude Code hook: NOT WRITTEN: ${SETTINGS_FILE} is committed in this repository.`,
+        '  The entry holds a path of this machine, which does not belong in a committed file.',
+      ];
+    case 'unsafe-path':
+      return ['Claude Code hook: NOT WRITTEN: the folder the tool is in has a quote, a dollar sign or a backtick in its name.'];
+  }
+}
+
 export async function installCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  // A policy is needed first: without one, the hook would block every push.
+  // A policy is needed first: without one, the git hook would block every push.
   const setup = setUp('install', INSTALL_USAGE, args, io);
   if (!setup.ok) return setup.code;
   const { policy, root } = setup;
 
-  const refused = (lines: readonly string[]): ExitCode => {
-    io.out(`gotreceipts install: REFUSED: ${lines[0] ?? ''}`);
-    for (const line of lines.slice(1)) io.out(line);
-    io.out('Nothing was changed.');
-    return EXIT.REFUSED;
-  };
-
   const launcher = currentLauncher();
   if (looksTemporary(launcher.cli)) {
-    return refused([
-      'the tool is running from a temporary folder, the kind "npx" downloads into.',
-      'A hook that points there would break when that folder is cleaned.',
-      'Install the tool first (npm install --save-dev gotreceipts, or npm install --global gotreceipts),',
-      'then run "gotreceipts install" again.',
-    ]);
+    io.out('gotreceipts install: REFUSED: the tool is running from a temporary folder, the kind "npx" downloads into.');
+    io.out('A hook that points there would break when that folder is cleaned.');
+    io.out('Install the tool first (npm install --save-dev gotreceipts, or npm install --global gotreceipts),');
+    io.out('then run "gotreceipts install" again.');
+    io.out('Nothing was changed.');
+    return EXIT.REFUSED;
   }
 
-  const place = findHooksFolder(root);
-  if (place.kind === 'unknown') {
-    io.err('gotreceipts install: CANNOT RUN: git could not say where its hooks folder is');
-    return EXIT.CANNOT_RUN;
-  }
-  if (place.kind === 'custom') {
-    return refused([
-      `git looks for hooks in "${place.setting}" (the setting core.hooksPath).`,
-      'Such a folder is usually committed, and a hook written here holds paths of this machine.',
-      'Add this line to the pre-push hook in that folder instead:',
-      `  ${SHARED_HOOK_LINE}`,
-    ]);
-  }
-
-  const outcome = installHook(place.folder, 'pre-push', launcher);
-  if (outcome === 'blocked-by-two-older-hooks') {
-    return refused([
-      `a pre-push hook that this tool did not write is there, and so is ${keptName('pre-push')}.`,
-      'One of them has to go before the tool can keep the other. Merge the two by hand,',
-      'then run "gotreceipts install" again.',
-    ]);
-  }
-
-  io.out('gotreceipts install: done.');
-  if (outcome === 'written') io.out('  pre-push hook: written');
-  if (outcome === 'updated') io.out('  pre-push hook: was already there, written again');
-  if (outcome === 'written-after-keeping-older') {
-    io.out(`  pre-push hook: written. The hook that was there is kept as ${keptName('pre-push')} and runs first`);
-  }
+  io.out('gotreceipts install:');
+  for (const line of [...installGitPart(root, launcher), ...installAgentPart(root, launcher)]) io.out(`  ${line}`);
   io.out('');
   return verdict(io, printReport(io, inspect(root, policy)));
 }
@@ -157,26 +183,35 @@ export async function uninstallCommand(args: readonly string[], io: Io): Promise
     return EXIT.CANNOT_RUN;
   }
 
+  let failed = false;
+  io.out('gotreceipts uninstall:');
+
   const place = findHooksFolder(root);
   if (place.kind === 'unknown') {
-    io.err('gotreceipts uninstall: CANNOT RUN: git could not say where its hooks folder is');
-    return EXIT.CANNOT_RUN;
-  }
-  if (place.kind === 'custom') {
-    io.out(`gotreceipts uninstall: git looks for hooks in "${place.setting}". The tool never wrote there, so there is nothing to remove.`);
-    return EXIT.PASS;
+    io.out('  git pre-push hook: NOT REMOVED: git could not say where its hooks folder is');
+    failed = true;
+  } else if (place.kind === 'custom') {
+    io.out(`  git pre-push hook: git looks for hooks in "${place.setting}". The tool never wrote there, so there is nothing to remove`);
+  } else {
+    const said = {
+      removed: 'removed',
+      'removed-and-restored-older': `removed. The hook kept as ${keptName('pre-push')} is back in its place`,
+      'not-installed': 'was not installed, nothing to remove',
+      'not-ours': 'a hook is there that this tool did not write. It was left as it is',
+    }[uninstallHook(place.folder, 'pre-push')];
+    io.out(`  git pre-push hook: ${said}`);
   }
 
-  const outcome = uninstallHook(place.folder, 'pre-push');
-  const said = {
-    removed: 'pre-push hook: removed',
-    'removed-and-restored-older': `pre-push hook: removed. The hook kept as ${keptName('pre-push')} is back in its place`,
-    'not-installed': 'pre-push hook: was not installed, nothing to remove',
-    'not-ours': 'pre-push hook: a hook is there that this tool did not write. It was left as it is',
-  }[outcome];
-  io.out('gotreceipts uninstall: done.');
-  io.out(`  ${said}`);
-  io.out('From now on, a push from this clone is not checked.');
+  const agent = uninstallAgentHook(root);
+  if (agent === 'unreadable') {
+    io.out(`  Claude Code hook: NOT REMOVED: ${SETTINGS_FILE} could not be read. Nothing in it was changed`);
+    failed = true;
+  } else {
+    io.out(`  Claude Code hook: ${agent === 'removed' ? `removed from ${SETTINGS_FILE}` : 'was not installed, nothing to remove'}`);
+  }
+
+  if (failed) return EXIT.REFUSED;
+  io.out('From now on, nothing in this clone is checked by this tool.');
   return EXIT.PASS;
 }
 
@@ -186,8 +221,8 @@ export async function doctorCommand(args: readonly string[], io: Io): Promise<Ex
 
   io.out('gotreceipts doctor: what is enforced in this clone');
   io.out('');
-  const protectedNow = printReport(io, inspect(setup.root, setup.policy));
-  const code = verdict(io, protectedNow);
-  if (!protectedNow) io.out('To put the hook in place: gotreceipts install');
+  const missing = printReport(io, inspect(setup.root, setup.policy));
+  const code = verdict(io, missing);
+  if (missing.length > 0) io.out('To put the hooks in place: gotreceipts install');
   return code;
 }
