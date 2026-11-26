@@ -1,5 +1,6 @@
 import { EXIT, type ExitCode } from './exit-codes.ts';
 import { readVersion } from './version.ts';
+import { wordsCommand } from './words/command.ts';
 
 /** Where a command writes. Tests pass their own, so nothing is printed for real. */
 export interface Io {
@@ -8,11 +9,16 @@ export interface Io {
 }
 
 export const USAGE = [
-  'Usage: gotreceipts <command>',
+  'Usage: gotreceipts <command> [options]',
+  '',
+  'Commands:',
+  '  words            Fail if a file, a file path or a commit message contains a private word',
   '',
   'Options:',
   '  -h, --help       Show this help',
   '  -v, --version    Show the version',
+  '',
+  'Run "gotreceipts <command> --help" for the options of one command.',
   '',
   'Exit codes: 0 = pass, 1 = refused, 2 = could not run.',
 ].join('\n');
@@ -25,6 +31,7 @@ export const USAGE = [
  */
 export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
   const command = argv[0];
+  const rest = argv.slice(1);
 
   if (command === undefined) {
     io.err('gotreceipts: no command given.');
@@ -40,6 +47,10 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
   if (command === '--version' || command === '-v') {
     io.out(readVersion());
     return EXIT.PASS;
+  }
+
+  if (command === 'words') {
+    return wordsCommand(rest, io);
   }
 
   io.err(`gotreceipts: unknown command "${command}".`);
