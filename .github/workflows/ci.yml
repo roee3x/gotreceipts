@@ -1,0 +1,67 @@
+name: CI
+
+# Runs on every push to any branch and on every pull request.
+# The pull request run checks the merged result, not only the branch.
+on:
+  push:
+  pull_request:
+
+# The workflow can read the code and nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Build and test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      # Actions are pinned to an exact commit, so a moved tag cannot change what runs.
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install the locked dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  # One check for the branch rules to require.
+  # It passes only when every job above passed.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail unless every job passed
+        shell: bash
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          echo "check: $CHECK_RESULT"
+          test "$CHECK_RESULT" = "success"
