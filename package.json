@@ -1,6 +1,6 @@
 {
   "name": "gotreceipts",
-  "version": "0.1.0-dev",
+  "version": "0.1.0",
   "private": true,
   "description": "Merge gate for AI coding agents. No receipt, no merge.",
   "license": "MIT",
