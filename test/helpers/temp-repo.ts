@@ -21,6 +21,8 @@ const CHECK_SCRIPTS: Record<string, string> = {
   'count.js': "console.log(process.argv[2] + ' ran');\n",
   // Never finishes on its own.
   'slow.js': 'setTimeout(() => {}, 600000);\n',
+  // Passes, unless the environment says to fail. Like a check that passes on one run and fails on the next.
+  'flaky.js': "process.exit(process.env.GOTRECEIPTS_TEST_FAIL === '1' ? 1 : 0);\n",
   // Changes a tracked file, like a formatter that rewrites the code it checks.
   'touch.js': "require('node:fs').appendFileSync('data.txt', 'changed\\n');\n",
 };

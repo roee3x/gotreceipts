@@ -2,6 +2,7 @@ import { EXIT, type ExitCode } from './exit-codes.ts';
 import { gateCommand } from './gate/command.ts';
 import { policyCommand } from './policy/command.ts';
 import { readVersion } from './version.ts';
+import { verifyCommand } from './verify/command.ts';
 import { wordsCommand } from './words/command.ts';
 
 /** Where a command writes. Tests pass their own, so nothing is printed for real. */
@@ -16,6 +17,7 @@ export const USAGE = [
   'Commands:',
   '  gate             Run the checks of a gate level on the current commit',
   '  policy           Check gotreceipts.json and show what the gate will do',
+  '  verify           Say whether a commit has a record that satisfies a gate level',
   '  words            Fail if a file, a file path or a commit message contains a private word',
   '',
   'Options:',
@@ -63,6 +65,10 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
 
   if (command === 'gate') {
     return gateCommand(rest, io);
+  }
+
+  if (command === 'verify') {
+    return verifyCommand(rest, io);
   }
 
   io.err(`gotreceipts: unknown command "${command}".`);
