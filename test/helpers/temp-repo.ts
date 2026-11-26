@@ -96,14 +96,27 @@ export function tempRepo(t: TestContext, options: RepoOptions = {}): string {
   return repo;
 }
 
-/** Runs the built tool in `cwd`. */
-export function runCli(cwd: string, args: string[], extraEnv: Record<string, string> = {}): RunResult {
+/** Runs the built tool in `cwd`. `input` is what the tool reads, as if it were piped to it. */
+export function runCli(cwd: string, args: string[], extraEnv: Record<string, string> = {}, input = ''): RunResult {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, ...extraEnv },
+    input,
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/**
+ * Makes an empty repository that `repo` can push to, the way a server would hold it,
+ * and adds it to `repo` under the name "origin". Returns its folder.
+ */
+export function addRemote(t: TestContext, repo: string): string {
+  const remote = mkdtempSync(join(tmpdir(), 'gotreceipts-remote-'));
+  t.after(() => rmSync(remote, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  assert.equal(gitIn(remote, 'init', '--quiet', '--bare').status, 0);
+  assert.equal(gitIn(repo, 'remote', 'add', 'origin', remote).status, 0);
+  return remote;
 }
 
 /** The last line of some output that is not empty. */
