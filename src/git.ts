@@ -40,6 +40,16 @@ export function headCommit(root: string): string | undefined {
   return sha === '' ? undefined : sha;
 }
 
+/** The full id of the commit a name points to (a branch, a tag, a short id), or undefined when there is none. */
+export function resolveCommit(root: string, name: string): string | undefined {
+  // A name that starts with "-" would be read by git as an option, so it is refused here.
+  if (name.startsWith('-')) return undefined;
+  const result = git(['rev-parse', '--verify', '--quiet', `${name}^{commit}`], root);
+  if (!result.ok) return undefined;
+  const sha = result.stdout.trim();
+  return sha === '' ? undefined : sha;
+}
+
 /** The id of the file tree of the commit that is checked out. */
 export function headTree(root: string): string | undefined {
   const result = git(['rev-parse', '--verify', '--quiet', 'HEAD^{tree}'], root);
