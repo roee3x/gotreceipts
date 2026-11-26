@@ -1,0 +1,74 @@
+name: CI
+
+# Runs on every push to any branch and on every pull request.
+# The pull request run checks the merged result, not only the branch.
+on:
+  push:
+  pull_request:
+
+# The workflow can read the code and nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Gate (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      # Actions are pinned to an exact commit, so a moved tag cannot change what runs.
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install the locked dependencies
+        run: npm ci
+
+      # The tool gates its own repository, so it is built once before it can run.
+      - name: Build the tool
+        run: npm run build
+
+      # The same command a developer runs locally, reading the same gotreceipts.json.
+      # Level G1 is every check that can run here: the type check, the build, the tests,
+      # and packing the package, installing it in an empty folder and running it.
+      # Level G2 adds the private-word check. Its word list is private, so it is not in
+      # this repository, and that level runs on the maintainer's machine.
+      - name: Run the gate
+        run: node dist/cli.js gate --level G1
+
+      # The gate wrote a record for this commit. This reads it back and checks it.
+      - name: Verify the record
+        run: node dist/cli.js verify --level G1
+
+  # One check for the branch rules to require.
+  # It passes only when every job above passed.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail unless every job passed
+        shell: bash
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          echo "check: $CHECK_RESULT"
+          test "$CHECK_RESULT" = "success"
