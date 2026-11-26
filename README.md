@@ -8,7 +8,7 @@ An agent will happily tell you "all tests pass". GotReceipts asks for the receip
 
 ## Status
 
-Version 0.1, "the receipt". The two commands everything else stands on are working: one makes the receipt, the other checks it. Nothing is blocked yet, and there is nothing to install yet.
+Version 0.1, "the receipt". The two commands everything else stands on are working: one makes the receipt, the other checks it. Nothing is blocked yet. That is version 0.2.
 
 - `main` only moves when a release has passed every gate. That rule is the product, so this repo follows it.
 - Day-to-day work happens on the `version/*` branches.
