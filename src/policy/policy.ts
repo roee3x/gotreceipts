@@ -82,9 +82,9 @@ export interface Policy {
     readonly maxAgeHours: number;
   };
   /**
-   * Set when records and approvals travel: "approve" and "merge" send them to the remote, and
-   * "merge" asks the remote for them. Left out otherwise, so that writing "false" changes
-   * nothing. Without it nothing leaves the clone unless a person runs "send".
+   * Set when records and approvals travel: the push hook, "approve" and "merge" send them to
+   * the remote, and "merge" asks the remote for them. Left out otherwise, so that writing
+   * "false" changes nothing. Without it nothing leaves the clone unless a person runs "send".
    */
   readonly travel?: true;
 }

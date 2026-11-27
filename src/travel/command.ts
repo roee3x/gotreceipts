@@ -27,7 +27,7 @@ export const SEND_USAGE = [
   'commands and results, the times, and the system and Node version it ran on. An approval:',
   'the commit, the branch, the time, and the signature. On a public repository, all of it is public.',
   '',
-  'A policy that says "travel": true has "approve" and "merge" do this by themselves.',
+  'A policy that says "travel": true has the push hook, "approve" and "merge" do this by themselves.',
   '',
   'Options:',
   '  --remote <name>  The remote to send to. Default: "origin", or the only remote there is',

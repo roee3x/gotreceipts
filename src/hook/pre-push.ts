@@ -4,6 +4,8 @@ import { hasCommit, headCommit, repoRoot } from '../git.ts';
 import type { Io } from '../main.ts';
 import { policyFor, sourceLines, type PolicyChoice, type PolicySource } from '../policy/committed.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
+import { countOf } from '../travel/receipts.ts';
+import { sendReceipts } from '../travel/remote.ts';
 import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
 
@@ -123,8 +125,9 @@ function plural(count: number, one: string, many: string): string {
  * A commit that edits the policy file is still judged by the policy it found there.
  *
  * `input` is what git wrote to the hook, and `now` is the current time in milliseconds.
+ * `remote` is the remote git is pushing to, by its name or its address.
  */
-export function prePush(input: string, io: Io, now: number): ExitCode {
+export function prePush(input: string, io: Io, now: number, remote?: string): ExitCode {
   const cannotCheck = (reasons: readonly string[]): ExitCode => {
     for (const reason of reasons) io.err(`gotreceipts pre-push: CANNOT CHECK: ${reason}`);
     io.err('The push is blocked. A check that could not run is never treated as a pass.');
@@ -207,6 +210,18 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
   }
 
   if (withoutRecord === 0 && withoutApproval === 0) {
+    // When the policy says records and approvals travel, what opened this door goes to the
+    // remote with the push, so that the check on the remote's side finds it. Sending is not a
+    // check: when it fails the push still goes on, and the line says how to send it afterwards.
+    for (const step of toCheck) {
+      if (step.policy.travel !== true || remote === undefined) continue;
+      const sent = sendReceipts(root, remote, step.commit, now);
+      if (sent.kind === 'sent') io.out(`  ${step.branch}: sent to the remote: ${countOf(sent.sent)}`);
+      if (sent.kind === 'error') {
+        io.out(`  ${step.branch}: NOT SENT to the remote: ${sent.reason}`);
+        io.out(`      Send it after the push: gotreceipts send ${step.commit.slice(0, 7)}`);
+      }
+    }
     io.out(
       toCheck.length === 0
         ? 'VERDICT: PASS (nothing in this push needs a record)'

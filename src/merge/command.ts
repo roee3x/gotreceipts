@@ -213,12 +213,14 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
   }
 
   // 5c. When they travel, the record and the approval that opened this door go to the remote
-  //     before the merge, so that whoever looks afterwards finds them. If they cannot be sent,
-  //     nothing is merged: a merge that CI could not account for is worse than a later one.
+  //     before the merge, so that the check on the remote's side finds them. Sending is not a
+  //     check. When it fails, the merge still goes on and the line says how to send them:
+  //     this door was opened by what this clone holds, and the far side will notice what is missing.
   if (policy.travel === true && tier !== undefined) {
     const sent = sendReceipts(root, remote, commit, Date.now());
     if (sent.kind === 'error') {
-      return cannotRun(`the records and approvals of commit ${shortCommit} could not be sent to "${remote}": ${sent.reason}. Nothing was merged`);
+      io.out(`  NOT SENT to ${remote}: ${sent.reason}`);
+      io.out(`  an audit on the remote will not find them. Send them: gotreceipts send ${shortCommit}`);
     }
     if (sent.kind === 'sent') io.out(`  sent to ${remote}: ${countOf(sent.sent)}`);
     if (sent.kind === 'already') io.out(`  ${remote} already holds the records and approvals of this commit`);

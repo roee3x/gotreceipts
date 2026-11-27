@@ -189,7 +189,7 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   row(
     'records',
     inspection.travel
-      ? ['TRAVEL: "approve" and "merge" send records and approvals to the remote', 'another clone gets them with "gotreceipts fetch"']
+      ? ['TRAVEL: a push, "approve" and "merge" send records and approvals to the remote', 'another clone gets them with "gotreceipts fetch", and "gotreceipts audit" reads them there']
       : ['STAY IN THIS CLONE: another clone, and CI, cannot see them', 'they are sent only when someone runs "gotreceipts send"'],
   );
   row('git pre-push hook', hookLines(inspection.prePush));
@@ -218,6 +218,7 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   io.out('It does not stop:');
   io.out('  - "git push --no-verify" typed by a person. That option skips every git hook.');
   io.out('  - The merge button on GitHub, or a merge by a command the agent hook does not know: a script, an alias, another tool.');
+  io.out('    "gotreceipts audit", run in CI after each push, names such a merge afterwards.');
   io.out('  - Another coding agent than Claude Code, and Claude Code itself when its hook cannot run. That hook is early feedback, not a lock.');
   io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
   io.out('  - A record that someone wrote by hand inside the .git folder.');
