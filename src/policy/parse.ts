@@ -64,7 +64,7 @@ export function parsePolicy(text: string): PolicyResult {
   if (!isObject(raw)) {
     return { ok: false, errors: ['the policy must be a JSON object'] };
   }
-  noUnknownKeys(raw, '', ['schema', 'levels', 'tiers', 'record']);
+  noUnknownKeys(raw, '', ['schema', 'levels', 'tiers', 'record', 'protected']);
 
   if (raw['schema'] !== 1) {
     fail('schema', 'must be 1');
@@ -274,6 +274,44 @@ export function parsePolicy(text: string): PolicyResult {
     }
   }
 
+  // --- protected files ---
+  const protectedFiles: string[] = [];
+  const rawProtected = raw['protected'];
+  if (rawProtected !== undefined) {
+    if (!Array.isArray(rawProtected)) {
+      fail('protected', 'must be a list of files');
+    } else {
+      rawProtected.forEach((entry: unknown, index) => {
+        const where = `protected[${index}]`;
+        if (typeof entry !== 'string' || entry.trim() === '' || entry !== entry.trim()) {
+          fail(where, 'must be a file, a folder or a pattern, with no spaces around it');
+          return;
+        }
+        // One spelling per file: counted from the top of the repository, with forward slashes.
+        const path = entry.replace(/\/+$/, '');
+        if (entry.includes('\\')) {
+          fail(where, 'use forward slashes (/), also on Windows');
+        } else if (path === '' || path.startsWith('/') || path.split('/').some((part) => part === '' || part === '.' || part === '..')) {
+          fail(where, 'must be a path from the top of the repository, such as "ci/build.yml" or ".github/workflows"');
+        } else if (protectedFiles.includes(path)) {
+          fail(where, `"${path}" is listed more than once`);
+        } else {
+          protectedFiles.push(path);
+        }
+      });
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, policy: { schema: 1, levels, tiers, record: { maxAgeHours } } };
+  return {
+    ok: true,
+    policy: {
+      schema: 1,
+      levels,
+      tiers,
+      record: { maxAgeHours },
+      // An empty list is the same policy as no list, so it is left out and the policy id stays the same.
+      ...(protectedFiles.length > 0 ? { protected: protectedFiles } : {}),
+    },
+  };
 }

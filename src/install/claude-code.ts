@@ -6,7 +6,7 @@ import { isCommitted, keepOutOfGit } from './local-file.ts';
 
 /**
  * The Claude Code side of the installation: one entry in the project's local settings file,
- * which tells Claude Code to call this tool before it runs a shell command.
+ * which tells Claude Code to call this tool before it runs a shell command or changes a file.
  *
  * The local settings file is the one Claude Code keeps for a single machine. It is the right
  * place because the entry holds the path of the tool on this machine, like the git hook does.
@@ -17,8 +17,11 @@ import { isCommitted, keepOutOfGit } from './local-file.ts';
 /** The settings file, relative to the top of the repository. */
 export const SETTINGS_FILE = '.claude/settings.local.json';
 
-/** The tools of Claude Code that run a shell command. */
-const MATCHER = 'Bash|PowerShell';
+/**
+ * The tools of Claude Code the hook is called for: the two that run a shell command, and the
+ * ones that change a file. "MultiEdit" is a name older versions of Claude Code used.
+ */
+export const MATCHER = 'Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit';
 const HOOK_WORDS = 'hook claude-code';
 
 type Json = Record<string, unknown>;
@@ -102,16 +105,32 @@ function withOurs(settings: Json, commandLine: string): Json {
   return { ...cleaned, hooks: { ...hooks, PreToolUse: [...groups, ours] } };
 }
 
+/** The tools each entry of this tool is called for, as written in the settings. */
+function ourMatchers(settings: Json): unknown[] {
+  const hooks = settings['hooks'];
+  const groups = isObject(hooks) && Array.isArray(hooks['PreToolUse']) ? (hooks['PreToolUse'] as unknown[]) : [];
+  return groups
+    .filter((group): group is Json => isObject(group) && Array.isArray(group['hooks']) && (group['hooks'] as unknown[]).some(isOurs))
+    .map((group) => group['matcher']);
+}
+
 export type AgentState =
   | { readonly kind: 'none' }
-  | { readonly kind: 'installed'; readonly cli: string | undefined }
+  | {
+      readonly kind: 'installed';
+      readonly cli: string | undefined;
+      /** False when the entry was written by a version of the tool that covered fewer tools. */
+      readonly current: boolean;
+    }
   | { readonly kind: 'unreadable'; readonly reason: string };
 
 export function readAgentState(root: string): AgentState {
   const read = readSettings(join(root, SETTINGS_FILE));
   if (!read.ok) return { kind: 'unreadable', reason: read.reason };
   const [first] = ourHandlers(read.settings);
-  return first === undefined ? { kind: 'none' } : { kind: 'installed', cli: cliOf(first) };
+  if (first === undefined) return { kind: 'none' };
+  const matchers = ourMatchers(read.settings);
+  return { kind: 'installed', cli: cliOf(first), current: matchers.length === 1 && matchers[0] === MATCHER };
 }
 
 export type AgentInstall =

@@ -193,7 +193,7 @@ test('each command explains itself, and refuses an option it does not know', (t)
 
 // --- install: the Claude Code hook ---
 
-test('the Claude Code entry calls this tool before every shell command of the agent', (t) => {
+test('the Claude Code entry calls this tool before every shell command and every file edit of the agent', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   assert.equal(runCli(repo, ['install']).status, 0);
 
@@ -201,7 +201,7 @@ test('the Claude Code entry calls this tool before every shell command of the ag
     hooks: {
       PreToolUse: [
         {
-          matcher: 'Bash|PowerShell',
+          matcher: 'Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit',
           hooks: [{ type: 'command', command: `node "${cliPath.replace(/\\/g, '/')}" hook claude-code`, timeout: 10 }],
         },
       ],
@@ -359,6 +359,45 @@ test('doctor says "not protected" before install, and "pass" after', (t) => {
   assert.equal(lastLine(before.stdout), 'To put the hooks in place: gotreceipts install');
 
   assert.equal(runCli(repo, ['install']).status, 0);
+  const after = runCli(repo, ['doctor']);
+  assert.equal(after.status, 0);
+  assert.equal(lastLine(after.stdout), ALL_IN_PLACE);
+});
+
+test('doctor says how many files are protected from an edit by the agent', (t) => {
+  const plain = tempRepo(t, { policy: POLICY });
+  assert.equal(runCli(plain, ['install']).status, 0);
+  assert.match(
+    runCli(plain, ['doctor']).stdout,
+    /- Claude Code changing a protected file with its edit tools, without a question to the user first \(the policy file\)\./,
+  );
+
+  const listed = tempRepo(t, { policy: { ...POLICY, protected: ['checks', 'ci/build.yml'] } });
+  assert.equal(runCli(listed, ['install']).status, 0);
+  const report = runCli(listed, ['doctor']).stdout;
+  assert.match(report, /without a question to the user first \(the policy file and 2 more that the policy lists\)\./);
+  assert.match(report, /It does not stop:[\s\S]*- A protected file that is changed by a shell command\. The agent hook sees only the edit tools\./);
+});
+
+test('an entry written by an older version is named as out of date, and install brings it up to date', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  assert.equal(runCli(repo, ['install']).status, 0);
+
+  // What version 0.2 wrote: the same entry, called for the shell tools only.
+  const settings = readSettings(repo);
+  settings['hooks'].PreToolUse[0].matcher = 'Bash|PowerShell';
+  writeFileSync(settingsPath(repo), JSON.stringify(settings));
+
+  const before = runCli(repo, ['doctor']);
+  assert.equal(before.status, 1);
+  assert.match(before.stdout, /Claude Code hook\s+OUT OF DATE: the entry was written by an older version of the tool/);
+  assert.match(before.stdout, /it stops the merge commands, and it does not ask about edits of protected files/);
+  assert.match(before.stdout, /- Claude Code running a bare "gh pr merge"/, 'what the older entry does stop is still listed');
+  assert.doesNotMatch(before.stdout, /- Claude Code changing a protected file/);
+  assert.match(before.stdout, /VERDICT: NOT PROTECTED \(not in place: the current Claude Code hook\)/);
+
+  assert.equal(runCli(repo, ['install']).status, 0);
+  assert.equal(readSettings(repo)['hooks'].PreToolUse.length, 1, 'the older entry is replaced, not kept next to the new one');
   const after = runCli(repo, ['doctor']);
   assert.equal(after.status, 0);
   assert.equal(lastLine(after.stdout), ALL_IN_PLACE);

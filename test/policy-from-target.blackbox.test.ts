@@ -299,3 +299,113 @@ test('"policy --for" shows the policy a commit must pass to enter a branch, not 
 
   assert.equal(runCli(s.repo, ['policy', '--for', 'main', '--file', 'gotreceipts.json']).status, 2);
 });
+
+// --- protected files ---
+
+/** A policy that every commit passes, and that puts the folder of the checks under protection. */
+const GUARDED = { ...LOOSE, protected: ['checks'] };
+
+/** Commits one file on the branch that is checked out, and returns the new commit. */
+function commitFile(repo: string, path: string, content: string): string {
+  writeIn(repo, path, content);
+  assert.equal(gitIn(repo, 'add', '--all').status, 0);
+  const commit = gitIn(repo, 'commit', '--quiet', '-m', `test: change ${path}`);
+  assert.equal(commit.status, 0, commit.stderr);
+  return head(repo);
+}
+
+test('a commit that changes a protected file is named at every step: the gate, verify and the push', (t) => {
+  const s = scene(t, GUARDED);
+  const commit = commitFile(s.repo, 'checks/extra.js', 'process.exit(0);\n');
+
+  const gate = runCli(s.repo, ['gate', '--for', 'main']);
+  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
+  assert.match(gate.stdout, /\n {8}1 protected file is not the same as on origin\/main: checks\/extra\.js\n/);
+
+  const verify = runCli(s.repo, ['verify', '--for', 'main']);
+  assert.equal(verify.status, 0);
+  assert.match(verify.stdout, /1 protected file is not the same as on origin\/main: checks\/extra\.js/);
+
+  const push = pushToMain(s.repo, commit, s.base);
+  assert.equal(push.status, 0, push.stdout + push.stderr);
+  assert.match(push.stdout, /1 protected file is not the same as on "main" on the remote: checks\/extra\.js/);
+});
+
+test('a commit that changes no protected file gets no such line', (t) => {
+  const s = scene(t, GUARDED);
+  const commit = commitFile(s.repo, 'data.txt', 'changed\n');
+
+  for (const result of [runCli(s.repo, ['gate', '--for', 'main']), pushToMain(s.repo, commit, s.base)]) {
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /protected/);
+  }
+});
+
+test('the policy file is protected even when the policy lists nothing, and even when only its layout changes', (t) => {
+  const s = scene(t, LOOSE);
+  // The same policy, written on one line. Its meaning, and so its id, is the same.
+  commitFile(s.repo, 'gotreceipts.json', `${JSON.stringify(LOOSE)}\n`);
+
+  const gate = runCli(s.repo, ['gate', '--for', 'main']);
+  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
+  assert.doesNotMatch(gate.stdout, /It is judged by the policy that is already on/);
+  assert.match(gate.stdout, /1 protected file is not the same as on origin\/main: gotreceipts\.json/);
+});
+
+test('which files are protected is said by the target branch, so a commit cannot take a file off the list first', (t) => {
+  const s = scene(t, GUARDED);
+  commitPolicy(s.repo, LOOSE);
+  commitFile(s.repo, 'checks/extra.js', 'process.exit(0);\n');
+  gitIn(s.repo, 'rm', '--quiet', 'checks/fail.js');
+  assert.equal(gitIn(s.repo, 'commit', '--quiet', '-m', 'test: remove a check').status, 0);
+
+  const gate = runCli(s.repo, ['gate', '--for', 'main']);
+  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
+  assert.match(gate.stdout, /3 protected files are not the same as on origin\/main: checks\/extra\.js, checks\/fail\.js, gotreceipts\.json/);
+});
+
+test('a long list of protected files is cut short, with a count of the rest', (t) => {
+  const s = scene(t, GUARDED);
+  for (const name of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) writeIn(s.repo, `checks/${name}.js`, 'process.exit(0);\n');
+  assert.equal(gitIn(s.repo, 'add', '--all').status, 0);
+  assert.equal(gitIn(s.repo, 'commit', '--quiet', '-m', 'test: seven checks').status, 0);
+
+  const gate = runCli(s.repo, ['gate', '--for', 'main']);
+  assert.match(
+    gate.stdout,
+    /7 protected files are not the same as on origin\/main: checks\/a\.js, checks\/b\.js, checks\/c\.js, checks\/d\.js, checks\/e\.js and 2 more\n/,
+  );
+});
+
+test('a commit that would take a protected file back to an older state is seen, and the output says why it may be listed', (t) => {
+  const s = scene(t, GUARDED);
+
+  // Someone else changes a protected file on main, after this branch was cut.
+  assert.equal(gitIn(s.repo, 'switch', '--quiet', '-c', 'feature/other').status, 0);
+  const newer = commitFile(s.repo, 'checks/extra.js', 'process.exit(0);\n');
+  assert.equal(gitIn(s.repo, 'push', '--quiet', 'origin', 'feature/other:main').status, 0);
+  assert.equal(gitIn(s.repo, 'fetch', '--quiet', 'origin').status, 0);
+
+  // This branch does not hold that change. If main pointed to it, the protected file would be gone again.
+  assert.equal(gitIn(s.repo, 'switch', '--quiet', 'feature/thing').status, 0);
+  const commit = commitFile(s.repo, 'data.txt', 'changed\n');
+
+  const gate = runCli(s.repo, ['gate', '--for', 'main']);
+  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
+  assert.match(gate.stdout, /1 protected file is not the same as on origin\/main: checks\/extra\.js/);
+  assert.match(gate.stdout, /origin\/main holds commits this one does not, so a file may be listed because of a change made there/);
+
+  const push = pushToMain(s.repo, commit, newer);
+  assert.match(push.stdout, /1 protected file is not the same as on "main" on the remote: checks\/extra\.js/);
+  assert.match(push.stdout, /"main" on the remote holds commits this one does not/);
+});
+
+test('"policy" lists the protected files, with the policy file first', (t) => {
+  const s = scene(t, GUARDED);
+  const result = runCli(s.repo, ['policy', '--for', 'main']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /Protected files \(a change to one of these is a change to the gate itself\)\n {2}gotreceipts\.json {3}\(always, listed or not\)\n {2}checks\n/,
+  );
+});

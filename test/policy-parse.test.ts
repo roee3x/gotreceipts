@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { policyId } from '../src/policy/hash.ts';
 import { parsePolicy } from '../src/policy/parse.ts';
-import { checksForLevel, levelRank, tierForBranch, type Policy } from '../src/policy/policy.ts';
+import { checksForLevel, isProtectedPath, levelRank, protectedPatterns, tierForBranch, type Policy } from '../src/policy/policy.ts';
 
 /** A complete, valid policy as a plain object. Tests copy it and break one thing. */
 function validRaw(): Record<string, any> {
@@ -273,4 +273,85 @@ test('the policy id changes when the meaning changes', () => {
   const longerLife = validRaw();
   longerLife['record'].maxAgeHours = 9999;
   assert.notEqual(policyId(parseValid(longerLife)), base);
+});
+
+// --- protected files ---
+
+test('the list of protected files is optional, and is read with one spelling per file', () => {
+  assert.equal(parseValid(validRaw()).protected, undefined);
+
+  const raw = validRaw();
+  raw['protected'] = ['ci/build.yml', '.github/workflows/', 'scripts/*.sh'];
+  assert.deepEqual(parseValid(raw).protected, ['ci/build.yml', '.github/workflows', 'scripts/*.sh']);
+});
+
+test('an empty list of protected files is the same policy as no list', () => {
+  const base = policyId(parseValid(validRaw()));
+  const empty = validRaw();
+  empty['protected'] = [];
+  assert.equal(parseValid(empty).protected, undefined);
+  assert.equal(policyId(parseValid(empty)), base);
+});
+
+test('the policy id changes when a file is put under protection or taken out of it', () => {
+  const base = policyId(parseValid(validRaw()));
+  const one = validRaw();
+  one['protected'] = ['ci/build.yml'];
+  const two = validRaw();
+  two['protected'] = ['ci/build.yml', 'ci/deploy.yml'];
+  assert.notEqual(policyId(parseValid(one)), base);
+  assert.notEqual(policyId(parseValid(two)), policyId(parseValid(one)));
+});
+
+test('protected: a list of paths from the top of the repository, with forward slashes, each once', () => {
+  const refused: [unknown, RegExp][] = [
+    ['ci/build.yml', /^protected: must be a list of files/],
+    [[7], /^protected\[0\]: must be a file, a folder or a pattern/],
+    [[''], /^protected\[0\]: must be a file, a folder or a pattern/],
+    [[' ci/build.yml'], /^protected\[0\]: must be a file, a folder or a pattern, with no spaces around it/],
+    [['ci\\build.yml'], /^protected\[0\]: use forward slashes/],
+    [['/ci/build.yml'], /^protected\[0\]: must be a path from the top of the repository/],
+    [['ci/../build.yml'], /^protected\[0\]: must be a path from the top of the repository/],
+    [['./ci/build.yml'], /^protected\[0\]: must be a path from the top of the repository/],
+    [['ci//build.yml'], /^protected\[0\]: must be a path from the top of the repository/],
+    [['/'], /^protected\[0\]: must be a path from the top of the repository/],
+    [['ci', 'ci/'], /^protected\[1\]: "ci" is listed more than once/],
+  ];
+  for (const [value, expected] of refused) {
+    const raw = validRaw();
+    raw['protected'] = value;
+    assertError(raw, expected);
+  }
+});
+
+test('the policy file is always protected, listed or not', () => {
+  assert.deepEqual(protectedPatterns({}), ['gotreceipts.json']);
+  assert.deepEqual(protectedPatterns({ protected: ['ci', 'gotreceipts.json'] }), ['gotreceipts.json', 'ci']);
+  assert.equal(isProtectedPath({}, 'gotreceipts.json'), true);
+  assert.equal(isProtectedPath({}, 'data.txt'), false);
+  // Only the one at the top is the policy file.
+  assert.equal(isProtectedPath({}, 'examples/gotreceipts.json'), false);
+});
+
+test('a protected folder covers everything in it, and * stands for any run of characters', () => {
+  const policy = { protected: ['ci/build.yml', '.github/workflows', 'scripts/*.sh'] };
+  for (const path of ['ci/build.yml', '.github/workflows/ci.yml', '.github/workflows/deep/er.yml', 'scripts/release.sh', 'scripts/sub/x.sh']) {
+    assert.equal(isProtectedPath(policy, path), true, path);
+  }
+  for (const path of ['ci/build.yml.bak', 'ci/other.yml', '.github/workflows.md', '.github/CODEOWNERS', 'scripts/release.ts', 'my-ci/build.yml']) {
+    assert.equal(isProtectedPath(policy, path), false, path);
+  }
+});
+
+test('a capital letter does not get a file out of protection', () => {
+  const policy = { protected: ['ci/build.yml'] };
+  assert.equal(isProtectedPath(policy, 'CI/Build.YML'), true);
+  assert.equal(isProtectedPath(policy, 'GotReceipts.JSON'), true);
+});
+
+test('a name with a dot or a bracket in it is matched as written, not as a pattern', () => {
+  const policy = { protected: ['a.b', 'notes (old).txt'] };
+  assert.equal(isProtectedPath(policy, 'a.b'), true);
+  assert.equal(isProtectedPath(policy, 'axb'), false);
+  assert.equal(isProtectedPath(policy, 'notes (old).txt'), true);
 });

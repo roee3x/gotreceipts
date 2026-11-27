@@ -335,6 +335,7 @@ test('a pull request that takes the level off its target branch is still judged 
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /policy: the one on origin\/main, at commit \w{7}/);
   assert.match(result.stdout, /this commit changes the policy file\. It is judged by the policy that is already on origin\/main/);
+  assert.match(result.stdout, /1 protected file is not the same as on origin\/main: gotreceipts\.json/);
   assert.match(result.stdout, /commit \w{7} needs level G1/);
   assert.match(result.stdout, /VERDICT: REFUSED \(there is no record for this commit\)\. Nothing was merged\./);
   assert.deepEqual(s.mergeRequests(), []);
