@@ -108,6 +108,42 @@ test('everything else is let through', () => {
   }
 });
 
+test('"gotreceipts approve" is stopped: an approval is a person\'s signature', () => {
+  for (const line of [
+    'gotreceipts approve --for main',
+    'gotreceipts approve abc1234 --for main --key ~/.ssh/some_key',
+    'gotreceipts approve --pr 12',
+    'npx gotreceipts approve --for main',
+    'npx gotreceipts@0.3.0 approve --for main',
+    'node "C:/tools/gotreceipts/dist/cli.js" approve --for main',
+    'node dist/cli.js approve --for main',
+    'echo approve | gotreceipts approve --for main',
+    'git status && gotreceipts.cmd approve --for main',
+    'bash -c "gotreceipts approve --for main"',
+  ]) {
+    assert.equal(forbiddenCommand(line), 'approve', line);
+  }
+});
+
+test('reading about "approve" is not stopped, and neither is the word in another place', () => {
+  for (const line of [
+    'gotreceipts approve --help',
+    'gotreceipts approve -h',
+    'gotreceipts verify --for main',
+    'gotreceipts gate --for approve',
+    'git commit -m "docs: how to approve"',
+    'node scripts/approve.js',
+    'grep -r approve src',
+  ]) {
+    assert.equal(forbiddenCommand(line), undefined, line);
+  }
+
+  const message = guardMessage('approve', 'node "/opt/tool/cli.js"');
+  assert.match(message, /an approval is the signature of an owner of this repository/);
+  assert.match(message, /They run the command in their own terminal/);
+  assert.match(message, /do not make or use a key for it/);
+});
+
 test('when in doubt it stops: the words of a merge outside quotes are enough', () => {
   // Nothing would be merged here. The hook cannot know that, and a refusal with a clear message costs little.
   assert.equal(forbiddenCommand('echo gh pr merge 5'), 'gh-pr-merge');

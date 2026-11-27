@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util';
 
+import { approvalAdvice, approvalLines, judgeApproval } from '../approval/judge.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { fetchRef, hasCommit, headCommit, mergedTree, remoteBranchTip, remotes, repoRoot, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
@@ -26,6 +27,8 @@ export const MERGE_USAGE = [
   '  2. Its head commit has a valid record at the level the target branch needs.',
   '  3. The merged result would hold exactly the files of that commit. When the target branch',
   '     holds changes the commit does not contain, it would not, and the merge is refused.',
+  '  4. When the target branch asks for an approval, or the commit would change a protected',
+  '     file: the commit has a valid signed approval for that branch ("gotreceipts approve").',
   'Then it asks GitHub to merge that exact commit and no other.',
   'After the merge it compares what GitHub made with what was tested.',
   '',
@@ -44,7 +47,7 @@ export const MERGE_USAGE = [
 ].join('\n');
 
 /** The remote that holds the pull request's repository: the one whose address names it, else "origin". */
-function remoteFor(root: string, pullRequestUrl: string): string | undefined {
+export function remoteFor(root: string, pullRequestUrl: string): string | undefined {
   const all = remotes(root);
   const repository = repositoryOf(pullRequestUrl)?.toLowerCase();
   if (repository !== undefined) {
@@ -182,6 +185,14 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
       ]);
     }
     io.out(`  the merged result holds exactly the files of commit ${shortCommit}`);
+
+    // 5b. The approval, when the target branch or a protected file asks for one.
+    const approval = judgeApproval(root, policy, picked.source, commit, base, Date.now());
+    for (const line of approvalLines(approval)) io.out(`  ${line}`);
+    if (approval.kind === 'cannot-check') return cannotRun(`the approval could not be checked: ${approval.reason}`);
+    if (approval.kind === 'refused') {
+      return refused(`commit ${shortCommit} has its record, and no valid approval for "${base}"`, approvalAdvice(commit, base));
+    }
   }
 
   // 6. The merge, pinned to the commit that was checked.

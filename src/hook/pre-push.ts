@@ -1,7 +1,8 @@
+import { approvalLines, judgeApproval, type ApprovalDecision } from '../approval/judge.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { hasCommit, headCommit, repoRoot } from '../git.ts';
 import type { Io } from '../main.ts';
-import { policyFor, sourceLines, type PolicyChoice } from '../policy/committed.ts';
+import { policyFor, sourceLines, type PolicyChoice, type PolicySource } from '../policy/committed.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
 import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
@@ -63,6 +64,8 @@ export type PushStep =
       readonly commit: string;
       readonly level: string;
       readonly policy: Policy;
+      /** Where that policy came from, and what the commit would change that is protected. */
+      readonly source: PolicySource;
       /** Things to say about which policy was used. Empty in the plain case. */
       readonly notes: readonly string[];
     }
@@ -97,8 +100,14 @@ export function planPush(refs: readonly PushedRef[], policyOf: (entering: Enteri
     // The plain case, the policy that is already on the branch, is not spelled out on every push.
     const [first = '', ...more] = sourceLines(picked.source);
     const notes = picked.source.kind === 'own' ? [`policy: ${first}`] : more;
-    return { kind: 'check', branch, commit: ref.localSha, level: tier.level, policy: picked.policy, notes };
+    return { kind: 'check', branch, commit: ref.localSha, level: tier.level, policy: picked.policy, source: picked.source, notes };
   });
+}
+
+/** "the pushed commit has no valid record", or "2 of 3 pushed commits have no valid record". */
+function lacking(count: number, total: number, what: string): string {
+  if (total === 1) return `the pushed commit has no valid ${what}`;
+  return `${count} of ${total} pushed commits ${count === 1 ? 'has' : 'have'} no valid ${what}`;
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -149,11 +158,22 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
   if (errors.length > 0) return cannotCheck(errors);
 
   const toCheck = steps.filter((step) => step.kind === 'check');
+
+  // The approvals are judged before anything is printed. One that cannot be checked blocks the
+  // whole push, like every other "could not check" of this hook.
+  const approvals = new Map(toCheck.map((step) => [step, judgeApproval(root, step.policy, step.source, step.commit, step.branch, now)]));
+  const unchecked = [...approvals].flatMap(([step, approval]) =>
+    approval.kind === 'cannot-check' ? [`${step.branch}: the approval could not be checked: ${approval.reason}`] : [],
+  );
+  if (unchecked.length > 0) return cannotCheck(unchecked);
+
   io.out(`gotreceipts pre-push: ${plural(toCheck.length, 'branch', 'branches')} to check`);
 
   const head = headCommit(root);
-  const advice: string[] = [];
-  let refused = 0;
+  const recordAdvice: string[] = [];
+  const approvalNeeded: string[] = [];
+  let withoutRecord = 0;
+  let withoutApproval = 0;
 
   for (const step of steps) {
     if (step.kind === 'error') continue;
@@ -163,23 +183,30 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
     }
     const shortCommit = step.commit.slice(0, 7);
     const { decision, unreadable } = judgeCommit(root, step.policy, step.commit, step.level, now);
+    const approval: ApprovalDecision = approvals.get(step) ?? { kind: 'not-needed' };
     const subject = `  ${step.branch}: commit ${shortCommit} needs level ${step.level}`;
 
     if (decision.ok) {
       io.out(`${subject}: PASS (${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago)`);
       for (const note of step.notes) io.out(`      ${note}`);
     } else {
-      refused += 1;
+      withoutRecord += 1;
       io.out(`${subject}: REFUSED (${decision.summary})`);
       for (const note of step.notes) io.out(`      ${note}`);
       for (const detail of decision.details) io.out(`      ${detail}`);
       const command = `gotreceipts gate --for ${step.branch}`;
-      advice.push(step.commit === head ? `  ${command}` : `  ${command}   (with commit ${shortCommit} checked out)`);
+      recordAdvice.push(step.commit === head ? `  ${command}` : `  ${command}   (with commit ${shortCommit} checked out)`);
     }
     for (const file of unreadable) io.out(`      ignored, not a valid record: ${file}`);
+
+    for (const line of approvalLines(approval)) io.out(`      ${line}`);
+    if (approval.kind === 'refused') {
+      withoutApproval += 1;
+      approvalNeeded.push(`  gotreceipts approve ${shortCommit} --for ${step.branch}`);
+    }
   }
 
-  if (refused === 0) {
+  if (withoutRecord === 0 && withoutApproval === 0) {
     io.out(
       toCheck.length === 0
         ? 'VERDICT: PASS (nothing in this push needs a record)'
@@ -188,12 +215,18 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
     return EXIT.PASS;
   }
 
-  const what =
-    toCheck.length === 1
-      ? 'the pushed commit has no valid record'
-      : `${refused} of ${toCheck.length} pushed commits ${refused === 1 ? 'has' : 'have'} no valid record`;
+  const what = [
+    ...(withoutRecord > 0 ? [lacking(withoutRecord, toCheck.length, 'record')] : []),
+    ...(withoutApproval > 0 ? [lacking(withoutApproval, toCheck.length, 'approval')] : []),
+  ].join(', and ');
   io.out(`VERDICT: REFUSED (${what}). Nothing was pushed.`);
-  io.out('To make a record:');
-  for (const line of advice) io.out(line);
+  if (withoutRecord > 0) {
+    io.out('To make a record:');
+    for (const line of recordAdvice) io.out(line);
+  }
+  if (withoutApproval > 0) {
+    io.out('An approval is the signature of an owner. They give it in their own terminal:');
+    for (const line of approvalNeeded) io.out(line);
+  }
   return EXIT.REFUSED;
 }

@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { TestContext } from 'node:test';
@@ -154,4 +154,46 @@ export function looseFiles(repo: string, extraEnv: Record<string, string> = {}):
 /** The last line of some output that is not empty. */
 export function lastLine(text: string): string {
   return text.trimEnd().split('\n').at(-1)?.trimEnd() ?? '';
+}
+
+/** A signing key made for one test: no passphrase, in a folder of its own, removed when the test ends. */
+export interface TestKey {
+  /** The file of the private half. */
+  readonly file: string;
+  /** The public half as a policy lists it: the type and the body, with no comment. */
+  readonly publicKey: string;
+}
+
+export function testKey(t: TestContext): TestKey {
+  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-key-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const file = join(folder, 'key');
+  const made = spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', '', '-f', file], { encoding: 'utf8' });
+  assert.equal(made.status, 0, `ssh-keygen could not make a test key: ${made.error?.message ?? made.stderr}`);
+  const publicKey = readFileSync(`${file}.pub`, 'utf8').trim().split(/\s+/).slice(0, 2).join(' ');
+  return { file, publicKey };
+}
+
+/**
+ * Puts an approval into the repository without the "approve" command: any text, signed with any
+ * key, for any purpose. This is what someone would do who wants to make an approval by hand.
+ */
+export function plantApproval(
+  t: TestContext,
+  repo: string,
+  place: { readonly commit: string; readonly branch: string },
+  text: string,
+  key: TestKey,
+  purpose = 'gotreceipts-approval',
+): void {
+  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-planted-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const statement = join(folder, 'approval.json');
+  writeFileSync(statement, text);
+  const signed = spawnSync('ssh-keygen', ['-Y', 'sign', '-f', key.file, '-n', purpose, statement], { encoding: 'utf8' });
+  assert.equal(signed.status, 0, signed.stderr);
+
+  const name = `${encodeURIComponent(place.branch)}.json`;
+  writeIn(repo, `.git/gotreceipts/approvals/${place.commit}/${name}`, text);
+  writeIn(repo, `.git/gotreceipts/approvals/${place.commit}/${name}.sig`, readFileSync(`${statement}.sig`, 'utf8'));
 }

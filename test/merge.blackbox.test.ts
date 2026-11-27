@@ -11,7 +11,7 @@ import type { TestContext } from 'node:test';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { addRemote, gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { addRemote, gitIn, lastLine, runCli, tempRepo, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
 
 /** A feature branch needs G0. Entering main needs G1. The branch "notes" has no level. */
 const POLICY = {
@@ -50,8 +50,8 @@ function revision(folder: string, name: string): string {
  * A repository with a feature branch one commit ahead of the target branch, both pushed,
  * and a pull request #7 from the one into the other.
  */
-function scene(t: TestContext, base = 'main', withPolicy = true): Scene {
-  const repo = tempRepo(t, withPolicy ? { policy: POLICY } : {});
+function scene(t: TestContext, base = 'main', withPolicy = true, policy: unknown = POLICY): Scene {
+  const repo = tempRepo(t, withPolicy ? { policy } : {});
   const remote = addRemote(t, repo);
   assert.equal(gitIn(repo, 'push', '--quiet', 'origin', `feature/thing:${base}`).status, 0);
 
@@ -373,4 +373,72 @@ test('the policy is the one the remote has now, not the one this clone remembers
   assert.match(result.stdout, new RegExp(`policy: the one on origin/main, at commit ${moved.slice(0, 7)}`));
   assert.match(result.stdout, /it was made under a different policy than the current one/);
   assert.deepEqual(s.mergeRequests(), []);
+});
+
+// --- the approval ---
+
+/** The same policy, with one signer, and with main asking for an approval of every commit. */
+function approvalPolicy(owner: TestKey): unknown {
+  return {
+    ...POLICY,
+    tiers: [POLICY.tiers[0], { branch: 'main', level: 'G1', needsApproval: true }],
+    approval: { signers: [{ name: 'owner', key: owner.publicKey }] },
+  };
+}
+
+test('into a branch that asks for an approval, nothing is merged without one, and GitHub is never asked', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, approvalPolicy(owner));
+  const short = s.head.slice(0, 7);
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /G1 record, passed 0\.0 hours ago, under the current policy/);
+  assert.match(result.stdout, /approval: needed, because every commit that enters "main" needs one/);
+  assert.match(result.stdout, /there is no approval of this commit for "main"/);
+  assert.ok(
+    result.stdout.includes(`VERDICT: REFUSED (commit ${short} has its record, and no valid approval for "main"). Nothing was merged.`),
+    result.stdout,
+  );
+  assert.equal(lastLine(result.stdout), `  gotreceipts approve ${short} --for main`);
+  assert.deepEqual(s.mergeRequests(), []);
+});
+
+test('the owner approves the pull request by its number, and then it is merged', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, approvalPolicy(owner));
+  const short = s.head.slice(0, 7);
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+
+  const approved = runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n');
+  assert.equal(approved.status, 0, approved.stdout + approved.stderr);
+  assert.ok(approved.stdout.includes(`gotreceipts approve: commit ${short} into "main"`), approved.stdout);
+  assert.match(approved.stdout, /policy: the one on origin\/main, at commit \w{7}/);
+  assert.equal(lastLine(approved.stdout), `VERDICT: APPROVED (commit ${short} into "main", by owner)`);
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /approved by owner, 0\.0 hours ago/);
+  assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${short} into main)`);
+  assert.deepEqual(s.mergeRequests(), [['pr', 'merge', '7', '--merge', '--match-head-commit', s.head]]);
+});
+
+test('"approve --pr" cannot run for a pull request that is closed, or that GitHub does not know', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, approvalPolicy(owner));
+
+  s.change((state) => {
+    state['pr'].state = 'MERGED';
+  });
+  const closed = runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n');
+  assert.equal(closed.status, 2);
+  assert.match(closed.stderr, /CANNOT RUN: pull request #7 is not open: GitHub shows it as merged/);
+
+  s.change((state) => {
+    state['failView'] = 'no pull requests found';
+  });
+  const unknown = runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n');
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /CANNOT RUN: GitHub could not be asked about pull request #7/);
 });

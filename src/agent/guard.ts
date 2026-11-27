@@ -5,6 +5,7 @@
  *   gh pr merge ...                      merges on the server, where no git hook runs
  *   gh api .../pulls/N/merge (a PUT)     the same merge, asked for in another way
  *   git push --no-verify                 skips the hook that checks the push
+ *   gotreceipts approve ...              the approval is a person's signature, not the agent's
  *
  * The list is short on purpose. Stopping a command that is known is reliable. Working out
  * what an arbitrary shell line will do is not, and this code does not pretend to: a script, an
@@ -12,7 +13,16 @@
  * checkpoints. This is the early, friendly "no" before them.
  */
 
-export type GuardRule = 'gh-pr-merge' | 'gh-api-merge' | 'push-no-verify';
+export type GuardRule = 'gh-pr-merge' | 'gh-api-merge' | 'push-no-verify' | 'approve';
+
+/** True for a word that starts this tool: its command name, or its entry file run through node. */
+function isThisTool(word: string, before: string | undefined): boolean {
+  // "gotreceipts", "gotreceipts.cmd", and "gotreceipts@1.2.3" as a package runner is given it.
+  const name = programName(word).replace(/\.(cmd|ps1|bat)$/, '').replace(/@.*$/, '');
+  if (name === 'gotreceipts') return true;
+  // "node /path/to/gotreceipts/dist/cli.js", which is how the hooks start it.
+  return before !== undefined && programName(before) === 'node' && /(^|[\\/])cli\.js$/.test(word);
+}
 
 /** The quote characters that group words, and the characters that end one command and start the next. */
 const SEPARATORS = ';|&(){}`';
@@ -134,6 +144,11 @@ function ruleForCommand(words: readonly string[], depth: number): GuardRule | un
       if (first === 'push' && rest.includes('--no-verify')) return 'push-no-verify';
     }
 
+    // Asking for the help text of the command harms nobody.
+    if (isThisTool(words[index] ?? '', words[index - 1]) && rest[0] === 'approve' && !rest.includes('--help') && !rest.includes('-h')) {
+      return 'approve';
+    }
+
     const nestedOptions = NESTED[name];
     if (nestedOptions !== undefined && depth < 3) {
       const at = rest.findIndex((word) => nestedOptions.includes(word.toLowerCase()));
@@ -164,6 +179,13 @@ export function forbiddenCommand(line: string, depth = 0): GuardRule | undefined
  */
 export function guardMessage(rule: GuardRule, launcher: string): string {
   const fallback = `If "gotreceipts" is not found as a command, start it as: ${launcher}`;
+  if (rule === 'approve') {
+    return [
+      'gotreceipts: an approval is the signature of an owner of this repository, so "gotreceipts approve" is not for a coding agent to run.',
+      'Tell the user which commit needs an approval, for which branch, and why. They run the command in their own terminal.',
+      'Do not sign in their place, do not make or use a key for it, and do not look for another way.',
+    ].join(' ');
+  }
   if (rule === 'push-no-verify') {
     return [
       'gotreceipts: "git push --no-verify" skips the check that runs before a push, so it is not allowed in this repository.',

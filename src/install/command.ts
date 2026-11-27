@@ -21,6 +21,7 @@ export const INSTALL_USAGE = [
   '                      level must have a valid record at that level.',
   '  Claude Code hook    Before the agent runs a shell command: a bare "gh pr merge" and',
   '                      "git push --no-verify" are stopped, and the agent is told what to run.',
+  '                      "gotreceipts approve" is stopped too: an approval is for a person.',
   '                      Before the agent edits a protected file, such as the policy file:',
   '                      Claude Code asks the user first.',
   '  Claude Code skill   A short text that tells the agent how to work with the gate: when to',

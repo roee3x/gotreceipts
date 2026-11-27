@@ -1,3 +1,4 @@
+import { approveCommand } from './approval/command.ts';
 import { EXIT, type ExitCode } from './exit-codes.ts';
 import { gateCommand } from './gate/command.ts';
 import { hookCommand } from './hook/command.ts';
@@ -18,6 +19,7 @@ export const USAGE = [
   'Usage: gotreceipts <command> [options]',
   '',
   'Commands:',
+  '  approve          Sign an approval of one commit into one branch. For a person, not an agent',
   '  doctor           Report what is enforced in this clone, and what is not',
   '  gate             Run the checks of a gate level on the current commit',
   '  hook             The entry points git and the coding agent call. Not run by hand',
@@ -97,6 +99,10 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
 
   if (command === 'merge') {
     return mergeCommand(rest, io);
+  }
+
+  if (command === 'approve') {
+    return approveCommand(rest, io);
   }
 
   io.err(`gotreceipts: unknown command "${command}".`);

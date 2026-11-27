@@ -15,8 +15,8 @@ import { isProtectedPath } from '../policy/policy.ts';
  *
  * Claude Code gives it a JSON description of the call. The hook does two things:
  *
- *   A shell command that goes around the gate is denied, with the reason. Claude Code shows the
- *   reason to the agent.
+ *   A shell command that goes around the gate, or that would sign an approval in the place of
+ *   a person, is denied, with the reason. Claude Code shows the reason to the agent.
  *
  *   An edit of a protected file is sent to the user: Claude Code asks them before the edit is
  *   made, and shows them the reason. A protected file is part of the gate itself, so the

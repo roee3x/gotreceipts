@@ -355,3 +355,118 @@ test('a name with a dot or a bracket in it is matched as written, not as a patte
   assert.equal(isProtectedPath(policy, 'axb'), false);
   assert.equal(isProtectedPath(policy, 'notes (old).txt'), true);
 });
+
+// --- approval ---
+
+/** A public key of the right shape. No private half exists for it. */
+const KEY = `ssh-ed25519 ${'A'.repeat(68)}`;
+const OTHER_KEY = `ssh-ed25519 ${'B'.repeat(68)}`;
+
+test('the approval section is optional: signers, and for how long an approval counts', () => {
+  assert.equal(parseValid(validRaw()).approval, undefined);
+
+  const raw = validRaw();
+  raw['approval'] = { signers: [{ name: 'owner', key: KEY }] };
+  assert.deepEqual(parseValid(raw).approval, { signers: [{ name: 'owner', key: KEY }], maxAgeHours: 24 });
+
+  raw['approval'].maxAgeHours = 2;
+  raw['approval'].signers.push({ name: 'second-owner', key: OTHER_KEY });
+  assert.deepEqual(parseValid(raw).approval, {
+    signers: [
+      { name: 'owner', key: KEY },
+      { name: 'second-owner', key: OTHER_KEY },
+    ],
+    maxAgeHours: 2,
+  });
+});
+
+test('a branch may ask for an approval only when someone is listed who can give it', () => {
+  const noSigner = validRaw();
+  noSigner['tiers'][2].needsApproval = true;
+  assertError(noSigner, /^tiers\[2\]\.needsApproval: the policy lists no signer \(approval\.signers\), so nobody could give the approval/);
+
+  const withSigner = validRaw();
+  withSigner['approval'] = { signers: [{ name: 'owner', key: KEY }] };
+  withSigner['tiers'][2].needsApproval = true;
+  assert.deepEqual(parseValid(withSigner).tiers[2], { branch: 'main', level: 'G2', needsApproval: true });
+
+  const notYesOrNo = validRaw();
+  notYesOrNo['tiers'][2].needsApproval = 'yes';
+  assertError(notYesOrNo, /^tiers\[2\]\.needsApproval: must be true or false/);
+});
+
+test('writing "needsApproval: false" or the default hours is the same policy as leaving them out', () => {
+  const base = validRaw();
+  base['approval'] = { signers: [{ name: 'owner', key: KEY }] };
+  const id = policyId(parseValid(base));
+
+  const written = validRaw();
+  written['approval'] = { maxAgeHours: 24, signers: [{ key: KEY, name: 'owner' }] };
+  written['tiers'][0].needsApproval = false;
+  assert.equal(policyId(parseValid(written)), id);
+  assert.equal('needsApproval' in parseValid(written).tiers[0]!, false);
+});
+
+test('the policy id changes when a signer is added, when a branch starts to ask, and when an approval counts longer', () => {
+  const base = validRaw();
+  base['approval'] = { signers: [{ name: 'owner', key: KEY }] };
+  const id = policyId(parseValid(base));
+  assert.notEqual(id, policyId(parseValid(validRaw())), 'listing a first signer');
+
+  const secondSigner = structuredClone(base);
+  secondSigner['approval'].signers.push({ name: 'helper', key: OTHER_KEY });
+  assert.notEqual(policyId(parseValid(secondSigner)), id);
+
+  const otherKey = structuredClone(base);
+  otherKey['approval'].signers[0].key = OTHER_KEY;
+  assert.notEqual(policyId(parseValid(otherKey)), id);
+
+  const asks = structuredClone(base);
+  asks['tiers'][2].needsApproval = true;
+  assert.notEqual(policyId(parseValid(asks)), id);
+
+  const longer = structuredClone(base);
+  longer['approval'].maxAgeHours = 9999;
+  assert.notEqual(policyId(parseValid(longer)), id);
+});
+
+test('approval: each signer has a unique name and a unique key, written without its comment', () => {
+  const refused: [unknown, RegExp][] = [
+    ['owner', /^approval: must be an object/],
+    [{}, /^approval\.signers: must be a list with at least one signer/],
+    [{ signers: [] }, /^approval\.signers: must be a list with at least one signer/],
+    [{ signers: ['owner'] }, /^approval\.signers\[0\]: must be an object/],
+    [{ signers: [{ name: 'the owner', key: KEY }] }, /^approval\.signers\[0\]\.name: must be a name made of letters, digits, - and _/],
+    [{ signers: [{ name: 'owner', key: 'AAAA' }] }, /^approval\.signers\[0\]\.key: must be the public half of an SSH key/],
+    [{ signers: [{ name: 'owner', key: `ssh-dss ${'A'.repeat(68)}` }] }, /^approval\.signers\[0\]\.key: must be the public half of an SSH key/],
+    [
+      { signers: [{ name: 'owner', key: `${KEY} someone@some-machine` }] },
+      /^approval\.signers\[0\]\.key: leave out the comment at the end of the key\. It often holds a user name and the name of a machine/,
+    ],
+    [
+      { signers: [{ name: 'owner', key: KEY }, { name: 'owner', key: OTHER_KEY }] },
+      /^approval\.signers\[1\]\.name: "owner" is used by more than one signer/,
+    ],
+    [
+      { signers: [{ name: 'owner', key: KEY }, { name: 'helper', key: KEY }] },
+      /^approval\.signers\[1\]\.key: this key is listed more than once/,
+    ],
+    [{ signers: [{ name: 'owner', key: KEY, email: 'x' }] }, /^approval\.signers\[0\]\.email: unknown setting/],
+    [{ signers: [{ name: 'owner', key: KEY }], maxAgeHours: 0 }, /^approval\.maxAgeHours: must be a number above 0/],
+    [{ signers: [{ name: 'owner', key: KEY }], forever: true }, /^approval\.forever: unknown setting/],
+  ];
+  for (const [value, expected] of refused) {
+    const raw = validRaw();
+    raw['approval'] = value;
+    assertError(raw, expected);
+  }
+});
+
+test('a mistake in the approval section is reported once, not again for every branch that asks', () => {
+  const raw = validRaw();
+  raw['approval'] = { signers: [{ name: 'owner', key: 'not a key' }] };
+  raw['tiers'][2].needsApproval = true;
+  assert.deepEqual(errorsOf(raw), [
+    'approval.signers[0].key: must be the public half of an SSH key: its type and its body, such as "ssh-ed25519 AAAA..."',
+  ]);
+});

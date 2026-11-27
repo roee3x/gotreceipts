@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util';
 
+import { approvalAdvice, approvalLines, judgeApproval, type ApprovalDecision } from '../approval/judge.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { chooseLevel, targetBranch } from '../gate/command.ts';
 import { currentBranch, repoRoot, resolveCommit } from '../git.ts';
@@ -33,7 +34,10 @@ export const VERIFY_USAGE = [
   'A record satisfies a level when it passed, at that level or a higher one, under that policy,',
   'is still fresh, and no newer run failed a check that the level needs.',
   '',
-  'Exit codes: 0 = the commit has such a record, 1 = it does not, 2 = the question could not be answered.',
+  'When the branch asks for an approval, or the commit would change a protected file, the commit',
+  'also needs a valid signed approval for that branch. An owner gives it with "gotreceipts approve".',
+  '',
+  'Exit codes: 0 = the commit has what it needs, 1 = it does not, 2 = the question could not be answered.',
 ].join('\n');
 
 export async function verifyCommand(args: readonly string[], io: Io): Promise<ExitCode> {
@@ -104,16 +108,33 @@ export async function verifyCommand(args: readonly string[], io: Io): Promise<Ex
   }
 
   if (decision.ok) {
-    const { record } = decision;
-    io.out(`  ${record.level} record, passed ${shownAge(decision.ageHours)} hours ago, under the current policy`);
-    io.out(`VERDICT: PASS (commit ${shortCommit} satisfies level ${chosen.level})`);
-    return EXIT.PASS;
+    io.out(`  ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago, under the current policy`);
+  } else {
+    for (const detail of decision.details) io.out(`  ${detail}`);
   }
 
-  for (const detail of decision.details) io.out(`  ${detail}`);
-  io.out(`VERDICT: REFUSED (${decision.summary})`);
-  // The advice repeats how the level was asked for, so the gate reads the same policy as this did.
-  const how = options.level !== undefined ? ` --level ${options.level}` : options.for !== undefined ? ` --for ${options.for}` : '';
-  io.out(`To make a record: gotreceipts gate${how}`);
-  return EXIT.REFUSED;
+  // The approval. It is a question about entering a branch, so it is only asked when one is named.
+  const approval: ApprovalDecision =
+    target === undefined ? { kind: 'not-needed' } : judgeApproval(root, policy, picked.source, commit, target, Date.now());
+  for (const line of approvalLines(approval)) io.out(`  ${line}`);
+
+  if (!decision.ok) {
+    io.out(`VERDICT: REFUSED (${decision.summary})`);
+    if (approval.kind === 'refused' && target !== undefined) for (const line of approvalAdvice(commit, target)) io.out(line);
+    // The advice repeats how the level was asked for, so the gate reads the same policy as this did.
+    // It is the last line: the record is what the reader can make themselves.
+    const how = options.level !== undefined ? ` --level ${options.level}` : options.for !== undefined ? ` --for ${options.for}` : '';
+    io.out(`To make a record: gotreceipts gate${how}`);
+    return EXIT.REFUSED;
+  }
+  if (approval.kind === 'cannot-check') return cannotRun(`the approval could not be checked: ${approval.reason}`);
+  if (approval.kind === 'refused' && target !== undefined) {
+    io.out(`VERDICT: REFUSED (commit ${shortCommit} has its record, and no valid approval for "${target}")`);
+    for (const line of approvalAdvice(commit, target)) io.out(line);
+    return EXIT.REFUSED;
+  }
+
+  const approved = approval.kind === 'approved' && target !== undefined ? `, and is approved for "${target}"` : '';
+  io.out(`VERDICT: PASS (commit ${shortCommit} satisfies level ${chosen.level}${approved})`);
+  return EXIT.PASS;
 }

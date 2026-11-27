@@ -1,10 +1,12 @@
 import {
+  DEFAULT_APPROVAL_HOURS,
   DEFAULT_MAX_AGE_HOURS,
   DEFAULT_TIMEOUT_MINUTES,
   type Check,
   type Expect,
   type Level,
   type Policy,
+  type Signer,
   type Tier,
 } from './policy.ts';
 
@@ -16,6 +18,13 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /** A single | that is not part of ||. */
 const BARE_PIPE = /(^|[^|])\|([^|]|$)/;
+
+/** The key types OpenSSH can sign a file with. The "sk-" types are keys that live on a hardware token. */
+const KEY_TYPES =
+  '(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\\.com|sk-ecdsa-sha2-nistp256@openssh\\.com)';
+/** A public key as it stands in a ".pub" file, without the comment: the type, one space, the body. */
+const PUBLIC_KEY = new RegExp(`^${KEY_TYPES} [A-Za-z0-9+/]{32,}={0,3}$`);
+const PUBLIC_KEY_WITH_COMMENT = new RegExp(`^${KEY_TYPES} [A-Za-z0-9+/]{32,}={0,3}\\s+\\S`);
 
 type Json = Record<string, unknown>;
 
@@ -64,7 +73,7 @@ export function parsePolicy(text: string): PolicyResult {
   if (!isObject(raw)) {
     return { ok: false, errors: ['the policy must be a JSON object'] };
   }
-  noUnknownKeys(raw, '', ['schema', 'levels', 'tiers', 'record', 'protected']);
+  noUnknownKeys(raw, '', ['schema', 'levels', 'tiers', 'record', 'protected', 'approval']);
 
   if (raw['schema'] !== 1) {
     fail('schema', 'must be 1');
@@ -219,6 +228,72 @@ export function parsePolicy(text: string): PolicyResult {
     }
   }
 
+  // --- approval: who may sign, and for how long a signature counts ---
+  // Read before the tiers, because a tier may ask for an approval only when someone can give it.
+  const signers: Signer[] = [];
+  let approvalHours = DEFAULT_APPROVAL_HOURS;
+  const errorsBeforeApproval = errors.length;
+  const rawApproval = raw['approval'];
+  if (rawApproval !== undefined) {
+    if (!isObject(rawApproval)) {
+      fail('approval', 'must be an object');
+    } else {
+      noUnknownKeys(rawApproval, 'approval', ['signers', 'maxAgeHours']);
+
+      const rawSigners = rawApproval['signers'];
+      if (!Array.isArray(rawSigners) || rawSigners.length === 0) {
+        fail('approval.signers', 'must be a list with at least one signer');
+      } else {
+        rawSigners.forEach((rawSigner: unknown, index) => {
+          const where = `approval.signers[${index}]`;
+          if (!isObject(rawSigner)) {
+            fail(where, 'must be an object');
+            return;
+          }
+          noUnknownKeys(rawSigner, where, ['name', 'key']);
+
+          const name = rawSigner['name'];
+          let nameOk = false;
+          if (typeof name !== 'string' || !NAME.test(name)) {
+            fail(`${where}.name`, 'must be a name made of letters, digits, - and _');
+          } else if (signers.some((signer) => signer.name === name)) {
+            fail(`${where}.name`, `"${name}" is used by more than one signer`);
+          } else {
+            nameOk = true;
+          }
+
+          const key = rawSigner['key'];
+          let keyOk = false;
+          if (typeof key !== 'string' || !PUBLIC_KEY.test(key)) {
+            fail(
+              `${where}.key`,
+              typeof key === 'string' && PUBLIC_KEY_WITH_COMMENT.test(key)
+                ? 'leave out the comment at the end of the key. It often holds a user name and the name of a machine'
+                : 'must be the public half of an SSH key: its type and its body, such as "ssh-ed25519 AAAA..."',
+            );
+          } else if (signers.some((signer) => signer.key === key)) {
+            fail(`${where}.key`, 'this key is listed more than once');
+          } else {
+            keyOk = true;
+          }
+
+          if (nameOk && keyOk) signers.push({ name: name as string, key: key as string });
+        });
+      }
+
+      const hours = rawApproval['maxAgeHours'];
+      if (hours !== undefined) {
+        if (typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0) {
+          fail('approval.maxAgeHours', 'must be a number above 0');
+        } else {
+          approvalHours = hours;
+        }
+      }
+    }
+  }
+  // When the approval section itself is wrong, a tier is not blamed for it a second time.
+  const approvalHasErrors = errors.length > errorsBeforeApproval;
+
   // --- tiers ---
   const tiers: Tier[] = [];
   const rawTiers = raw['tiers'];
@@ -232,11 +307,19 @@ export function parsePolicy(text: string): PolicyResult {
         fail(where, 'must be an object');
         return;
       }
-      noUnknownKeys(rawTier, where, ['branch', 'level']);
+      noUnknownKeys(rawTier, where, ['branch', 'level', 'needsApproval']);
 
       const branch = rawTier['branch'];
       const level = rawTier['level'];
+      const needsApproval = rawTier['needsApproval'];
       let ok = true;
+      if (needsApproval !== undefined && typeof needsApproval !== 'boolean') {
+        fail(`${where}.needsApproval`, 'must be true or false');
+        ok = false;
+      } else if (needsApproval === true && signers.length === 0 && !approvalHasErrors) {
+        fail(`${where}.needsApproval`, 'the policy lists no signer (approval.signers), so nobody could give the approval');
+        ok = false;
+      }
       if (typeof branch !== 'string' || branch.trim() === '') {
         fail(`${where}.branch`, 'must be a branch name or pattern');
         ok = false;
@@ -251,7 +334,10 @@ export function parsePolicy(text: string): PolicyResult {
         fail(`${where}.level`, `must be the name of a level${known === '' ? '' : ` (${known})`}`);
         ok = false;
       }
-      if (ok) tiers.push({ branch: branch as string, level: level as string });
+      if (ok) {
+        // "false" is the same as not written, so it is left out and the policy id stays the same.
+        tiers.push({ branch: branch as string, level: level as string, ...(needsApproval === true ? { needsApproval: true } : {}) });
+      }
     });
   }
 
@@ -312,6 +398,7 @@ export function parsePolicy(text: string): PolicyResult {
       record: { maxAgeHours },
       // An empty list is the same policy as no list, so it is left out and the policy id stays the same.
       ...(protectedFiles.length > 0 ? { protected: protectedFiles } : {}),
+      ...(signers.length > 0 ? { approval: { signers, maxAgeHours: approvalHours } } : {}),
     },
   };
 }

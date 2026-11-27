@@ -34,6 +34,10 @@ export interface Inspection {
   readonly guarded: readonly string[];
   /** How many protected files or patterns the policy lists, on top of the policy file itself. */
   readonly protectedListed: number;
+  /** The names of those whose signature counts as an approval. Empty: the policy is not locked. */
+  readonly signers: readonly string[];
+  /** The branch patterns that ask for an approval of every commit. */
+  readonly approvalBranches: readonly string[];
   readonly prePush: HookFinding;
   readonly claudeCode: AgentFinding;
   /** The skill explains the gate to the agent. It is reported, and it is no part of the verdict. */
@@ -66,6 +70,8 @@ export function inspect(root: string, policy: Policy): Inspection {
     levels: policy.levels.length,
     guarded: policy.tiers.map((tier) => tier.branch),
     protectedListed: protectedPatterns(policy).length - 1,
+    signers: (policy.approval?.signers ?? []).map((signer) => signer.name),
+    approvalBranches: policy.tiers.filter((tier) => tier.needsApproval === true).map((tier) => tier.branch),
     prePush: inspectHook(root, 'pre-push'),
     claudeCode: inspectAgent(root),
     skill: readSkillState(root, currentLauncher()),
@@ -163,6 +169,20 @@ export function printReport(io: Io, inspection: Inspection): string[] {
       inspection.guarded.length === 0 ? 'no branch' : inspection.guarded.join(', ')
     }`,
   ]);
+  const locked = inspection.signers.length > 0;
+  row(
+    'approval',
+    locked
+      ? [
+          `LOCKED: ${inspection.signers.length === 1 ? '1 signer' : `${inspection.signers.length} signers`} (${inspection.signers.join(', ')})`,
+          'a change to a protected file needs a signed approval' +
+            (inspection.approvalBranches.length === 0 ? '' : `, and so does every commit into ${inspection.approvalBranches.join(', ')}`),
+        ]
+      : [
+          'NOT LOCKED: the policy lists no signer',
+          'a change to a protected file, the policy file included, needs nobody\'s signature',
+        ],
+  );
   row('git pre-push hook', hookLines(inspection.prePush));
   row('Claude Code hook', agentLines(inspection.claudeCode));
   row('Claude Code skill', skillLines(inspection.skill));
@@ -172,11 +192,13 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   if (pushHook) {
     io.out('  - "git push" of a commit that has no valid record, into a branch with a level.');
     io.out('  - A commit that edits the policy file to get itself in. It is judged by the policy that is already on the branch.');
+    if (locked) io.out('  - "git push" of a commit that needs an approval and has no valid one. See "approval" above for what needs one.');
   }
   if (inspection.prePush.state === 'broken') io.out('  - Every "git push", because the hook cannot find its tool.');
   if (agentHook) {
     io.out('  - Claude Code running a bare "gh pr merge", the same merge through "gh api", or "git push --no-verify".');
     io.out('    It is told to use "gotreceipts merge", which checks the record first.');
+    io.out('  - Claude Code running "gotreceipts approve". An approval is for a person to give, and it is told to hand it over.');
   }
   if (agentCurrent) {
     io.out(`  - Claude Code changing a protected file with its edit tools, without a question to the user first (${protectedSummary(inspection)}).`);
@@ -190,9 +212,19 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   io.out('  - Another coding agent than Claude Code, and Claude Code itself when its hook cannot run. That hook is early feedback, not a lock.');
   io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
   io.out('  - A record that someone wrote by hand inside the .git folder.');
-  io.out('  - A change to the policy file that was merged like any other change. From then on it is the policy.');
+  if (locked) {
+    io.out('  - An approval made with a key that needs no passphrase, or that sits unlocked in the background.');
+    io.out('    Whatever runs on this machine can sign with such a key. The signature is as strong as the key is kept.');
+  } else {
+    io.out('  - A change to the policy file that was merged like any other change. From then on it is the policy.');
+    io.out('    Listing a signer in the policy (approval.signers) closes this: such a change then needs a signature.');
+  }
   io.out('  - A protected file that is changed by a shell command. The agent hook sees only the edit tools.');
-  io.out('    Such a change is named in the output of the gate, the push hook and the merge command.');
+  io.out(
+    locked
+      ? '    Such a change is named, and refused without an approval, by the push hook and the merge command.'
+      : '    Such a change is named in the output of the gate, the push hook and the merge command.',
+  );
   io.out('');
 
   const missing: string[] = [];
