@@ -19,7 +19,9 @@ if (patterns.length === 0) {
 let ran = 0;
 let failed = 0;
 
-const events = run({ globPatterns: patterns });
+// Test files run side by side. Each one is a process of its own, and they share nothing but
+// the built tool, which they only read. Left to its default, the runner takes one file at a time.
+const events = run({ globPatterns: patterns, concurrency: true });
 
 events.on('test:pass', (event) => {
   const isSuite = event.details.type === 'suite';
