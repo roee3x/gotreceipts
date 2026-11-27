@@ -38,6 +38,8 @@ export interface Inspection {
   readonly signers: readonly string[];
   /** The branch patterns that ask for an approval of every commit. */
   readonly approvalBranches: readonly string[];
+  /** True when the policy says records and approvals travel to the remote. */
+  readonly travel: boolean;
   readonly prePush: HookFinding;
   readonly claudeCode: AgentFinding;
   /** The skill explains the gate to the agent. It is reported, and it is no part of the verdict. */
@@ -72,6 +74,7 @@ export function inspect(root: string, policy: Policy): Inspection {
     protectedListed: protectedPatterns(policy).length - 1,
     signers: (policy.approval?.signers ?? []).map((signer) => signer.name),
     approvalBranches: policy.tiers.filter((tier) => tier.needsApproval === true).map((tier) => tier.branch),
+    travel: policy.travel === true,
     prePush: inspectHook(root, 'pre-push'),
     claudeCode: inspectAgent(root),
     skill: readSkillState(root, currentLauncher()),
@@ -182,6 +185,12 @@ export function printReport(io: Io, inspection: Inspection): string[] {
           'NOT LOCKED: the policy lists no signer',
           'a change to a protected file, the policy file included, needs nobody\'s signature',
         ],
+  );
+  row(
+    'records',
+    inspection.travel
+      ? ['TRAVEL: "approve" and "merge" send records and approvals to the remote', 'another clone gets them with "gotreceipts fetch"']
+      : ['STAY IN THIS CLONE: another clone, and CI, cannot see them', 'they are sent only when someone runs "gotreceipts send"'],
   );
   row('git pre-push hook', hookLines(inspection.prePush));
   row('Claude Code hook', agentLines(inspection.claudeCode));

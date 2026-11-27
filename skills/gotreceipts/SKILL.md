@@ -28,7 +28,7 @@ Every command ends with a `VERDICT:` line or a `CANNOT RUN` line, and with one o
 
 What the common answers mean:
 
-- **"there is no record for this commit"**: run the gate on that commit.
+- **"there is no record for this commit"**: run the gate on that commit. When the user says the record or the approval was made on another machine, `gotreceipts fetch <commit>` gets it from the remote.
 - **"its level is below"** the level that is needed: the target branch needs a higher level. Run `gotreceipts gate --for <target branch>`.
 - **"it is older than"** the hours a record counts for, or **"it was made under a different policy"**: run the gate again.
 - **"a newer run failed after it"**: a later run on the same commit failed. A check that passes only sometimes is a failing check. Find out why it failed. Do not run it again and again until it passes.
@@ -55,5 +55,7 @@ What the common answers mean:
 | `gotreceipts gate` | Runs the checks on the current commit and writes the record |
 | `gotreceipts verify [commit] --for <branch>` | Says whether a commit has what it needs to enter the branch: a valid record, and an approval when one is asked for. Runs nothing |
 | `gotreceipts merge <number>` | Merges a pull request, only when its commit has its record |
+| `gotreceipts send [commit]` | Sends the records and approvals this clone holds for a commit to the remote, for another clone or for CI. It changes no branch |
+| `gotreceipts fetch [commit]` | Gets the records and approvals the remote holds for a commit. Whether they count is still for `verify` to say |
 | `gotreceipts policy --for <branch>` | Shows the policy a commit must pass to enter that branch: the levels, their checks, which branch needs which level, and the protected files |
 | `gotreceipts doctor` | Shows what is enforced in this clone, and what is not |

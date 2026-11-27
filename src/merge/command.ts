@@ -6,6 +6,8 @@ import { fetchRef, hasCommit, headCommit, mergedTree, remoteBranchTip, remotes, 
 import type { Io } from '../main.ts';
 import { policyFor, sourceLines } from '../policy/committed.ts';
 import { tierForBranch } from '../policy/policy.ts';
+import { countOf } from '../travel/receipts.ts';
+import { fetchReceipts, sendReceipts } from '../travel/remote.ts';
 import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
 import {
@@ -34,6 +36,9 @@ export const MERGE_USAGE = [
   '',
   'The level and the policy are the ones that are already on the target branch, read from the',
   'remote. What the pull request did to its own copy of gotreceipts.json does not count.',
+  '',
+  'When that policy says "travel": true, the remote is first asked for records and approvals',
+  'of the commit, and the ones that opened the door are sent to the remote before the merge.',
   '',
   'Options:',
   '  --method <how>    merge (the default), squash or rebase',
@@ -150,6 +155,18 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
   io.out(`  policy: ${policyLine}`);
   for (const note of policyNotes) io.out(`  ${note}`);
 
+  // 3b. When the policy says records and approvals travel, the remote is asked for the ones of
+  //     this commit: the record may have been made in another clone, and the approval signed
+  //     on another machine. What arrives is judged below like anything this clone made itself.
+  if (policy.travel === true) {
+    const got = fetchReceipts(root, remote, commit, Date.now());
+    if (got.kind === 'error') {
+      io.out(`  ${remote} could not be asked for records and approvals of this commit: ${got.reason}`);
+    } else if (got.kind === 'got' && got.gained.length > 0) {
+      io.out(`  fetched from ${remote}: ${countOf(got.gained)}`);
+    }
+  }
+
   // 4. The record. 5. The merged result.
   const tier = tierForBranch(policy, base);
   let testedTree: string | undefined;
@@ -193,6 +210,18 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
     if (approval.kind === 'refused') {
       return refused(`commit ${shortCommit} has its record, and no valid approval for "${base}"`, approvalAdvice(commit, base));
     }
+  }
+
+  // 5c. When they travel, the record and the approval that opened this door go to the remote
+  //     before the merge, so that whoever looks afterwards finds them. If they cannot be sent,
+  //     nothing is merged: a merge that CI could not account for is worse than a later one.
+  if (policy.travel === true && tier !== undefined) {
+    const sent = sendReceipts(root, remote, commit, Date.now());
+    if (sent.kind === 'error') {
+      return cannotRun(`the records and approvals of commit ${shortCommit} could not be sent to "${remote}": ${sent.reason}. Nothing was merged`);
+    }
+    if (sent.kind === 'sent') io.out(`  sent to ${remote}: ${countOf(sent.sent)}`);
+    if (sent.kind === 'already') io.out(`  ${remote} already holds the records and approvals of this commit`);
   }
 
   // 6. The merge, pinned to the commit that was checked.

@@ -462,6 +462,27 @@ test('approval: each signer has a unique name and a unique key, written without 
   }
 });
 
+test('"travel" is true or false, and "false" is the same policy as leaving it out', () => {
+  const id = policyId(parseValid(validRaw()));
+  assert.equal(parseValid(validRaw()).travel, undefined);
+
+  const off = validRaw();
+  off['travel'] = false;
+  assert.equal('travel' in parseValid(off), false);
+  assert.equal(policyId(parseValid(off)), id);
+
+  const on = validRaw();
+  on['travel'] = true;
+  assert.equal(parseValid(on).travel, true);
+  assert.notEqual(policyId(parseValid(on)), id);
+
+  for (const value of ['yes', 1, 'origin', null, {}]) {
+    const raw = validRaw();
+    raw['travel'] = value;
+    assertError(raw, /^travel: must be true or false/);
+  }
+});
+
 test('a mistake in the approval section is reported once, not again for every branch that asks', () => {
   const raw = validRaw();
   raw['approval'] = { signers: [{ name: 'owner', key: 'not a key' }] };

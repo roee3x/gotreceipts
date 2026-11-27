@@ -81,6 +81,12 @@ export interface Policy {
     /** An approval older than this no longer counts. */
     readonly maxAgeHours: number;
   };
+  /**
+   * Set when records and approvals travel: "approve" and "merge" send them to the remote, and
+   * "merge" asks the remote for them. Left out otherwise, so that writing "false" changes
+   * nothing. Without it nothing leaves the clone unless a person runs "send".
+   */
+  readonly travel?: true;
 }
 
 export const POLICY_FILE_NAME = 'gotreceipts.json';
