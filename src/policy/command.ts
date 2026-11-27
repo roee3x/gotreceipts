@@ -6,7 +6,7 @@ import type { Io } from '../main.ts';
 import { knownTarget, policyInCommit } from './committed.ts';
 import { policyId } from './hash.ts';
 import { loadPolicy } from './load.ts';
-import { checksForLevel, POLICY_FILE_NAME, type Policy } from './policy.ts';
+import { checksForLevel, POLICY_FILE_NAME, protectedPatterns, type Policy } from './policy.ts';
 
 export const POLICY_USAGE = [
   'Usage: gotreceipts policy [options]',
@@ -45,6 +45,12 @@ function describe(io: Io, policy: Policy): void {
   const branchWidth = width(policy.tiers.map((tier) => tier.branch));
   for (const tier of policy.tiers) {
     io.out(`  ${tier.branch.padEnd(branchWidth)}  ${tier.level}`);
+  }
+  io.out('');
+
+  io.out('Protected files (a change to one of these is a change to the gate itself)');
+  for (const pattern of protectedPatterns(policy)) {
+    io.out(`  ${pattern}${pattern === POLICY_FILE_NAME ? '   (always, listed or not)' : ''}`);
   }
   io.out('');
 

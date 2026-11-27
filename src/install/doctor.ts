@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 
 import type { Io } from '../main.ts';
-import type { Policy } from '../policy/policy.ts';
+import { protectedPatterns, type Policy } from '../policy/policy.ts';
 import { readAgentState, SETTINGS_FILE } from './claude-code.ts';
 import { keptName } from './hook-script.ts';
 import { currentLauncher, findHooksFolder, readHookState, type HookName } from './hooks.ts';
@@ -22,6 +22,8 @@ export type HookFinding =
 /** What was found about the Claude Code hook in this clone. */
 export type AgentFinding =
   | { readonly state: 'installed' }
+  /** The entry was written by an older version of the tool and is called for fewer tools. */
+  | { readonly state: 'outdated' }
   | { readonly state: 'broken'; readonly cli: string | undefined }
   | { readonly state: 'missing' }
   | { readonly state: 'unreadable'; readonly reason: string };
@@ -30,6 +32,8 @@ export interface Inspection {
   readonly levels: number;
   /** The branch patterns the policy sets a level for. */
   readonly guarded: readonly string[];
+  /** How many protected files or patterns the policy lists, on top of the policy file itself. */
+  readonly protectedListed: number;
   readonly prePush: HookFinding;
   readonly claudeCode: AgentFinding;
   /** The skill explains the gate to the agent. It is reported, and it is no part of the verdict. */
@@ -53,7 +57,7 @@ function inspectAgent(root: string): AgentFinding {
   if (state.kind === 'none') return { state: 'missing' };
   if (state.kind === 'unreadable') return { state: 'unreadable', reason: state.reason };
   if (state.cli === undefined || !existsSync(state.cli)) return { state: 'broken', cli: state.cli };
-  return { state: 'installed' };
+  return { state: state.current ? 'installed' : 'outdated' };
 }
 
 /** Looks at this clone and says what is in place. It changes nothing. */
@@ -61,6 +65,7 @@ export function inspect(root: string, policy: Policy): Inspection {
   return {
     levels: policy.levels.length,
     guarded: policy.tiers.map((tier) => tier.branch),
+    protectedListed: protectedPatterns(policy).length - 1,
     prePush: inspectHook(root, 'pre-push'),
     claudeCode: inspectAgent(root),
     skill: readSkillState(root, currentLauncher()),
@@ -102,6 +107,12 @@ function agentLines(finding: AgentFinding): string[] {
   switch (finding.state) {
     case 'installed':
       return ['INSTALLED'];
+    case 'outdated':
+      return [
+        'OUT OF DATE: the entry was written by an older version of the tool',
+        'it stops the merge commands, and it does not ask about edits of protected files',
+        'run "gotreceipts install" to write it again',
+      ];
     case 'broken':
       return [
         finding.cli === undefined
@@ -143,7 +154,9 @@ export function printReport(io: Io, inspection: Inspection): string[] {
     for (const line of lines.slice(1)) io.out(`${blank}${line}`);
   };
   const pushHook = inspection.prePush.state === 'installed';
-  const agentHook = inspection.claudeCode.state === 'installed';
+  const agentCurrent = inspection.claudeCode.state === 'installed';
+  // An entry of an older version still stops the merge commands. It only lacks the newer part.
+  const agentHook = agentCurrent || inspection.claudeCode.state === 'outdated';
 
   row('policy file', [
     `OK: ${inspection.levels} ${inspection.levels === 1 ? 'level' : 'levels'}, and a level is set for ${
@@ -165,6 +178,9 @@ export function printReport(io: Io, inspection: Inspection): string[] {
     io.out('  - Claude Code running a bare "gh pr merge", the same merge through "gh api", or "git push --no-verify".');
     io.out('    It is told to use "gotreceipts merge", which checks the record first.');
   }
+  if (agentCurrent) {
+    io.out(`  - Claude Code changing a protected file with its edit tools, without a question to the user first (${protectedSummary(inspection)}).`);
+  }
   if (!pushHook && !agentHook && inspection.prePush.state !== 'broken') io.out('  - Nothing. No hook of this tool is in place.');
 
   io.out('');
@@ -175,10 +191,18 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
   io.out('  - A record that someone wrote by hand inside the .git folder.');
   io.out('  - A change to the policy file that was merged like any other change. From then on it is the policy.');
+  io.out('  - A protected file that is changed by a shell command. The agent hook sees only the edit tools.');
+  io.out('    Such a change is named in the output of the gate, the push hook and the merge command.');
   io.out('');
 
   const missing: string[] = [];
   if (!pushHook) missing.push('the push hook');
-  if (!agentHook) missing.push('the Claude Code hook');
+  if (!agentCurrent) missing.push(agentHook ? 'the current Claude Code hook' : 'the Claude Code hook');
   return missing;
+}
+
+/** "the policy file" or "the policy file and 2 more that the policy lists". */
+function protectedSummary(inspection: Inspection): string {
+  const listed = inspection.protectedListed;
+  return listed === 0 ? 'the policy file' : `the policy file and ${listed} more that the policy lists`;
 }

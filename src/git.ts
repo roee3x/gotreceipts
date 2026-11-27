@@ -111,6 +111,22 @@ export function treeOf(root: string, commit: string): string | undefined {
   return tree === '' ? undefined : tree;
 }
 
+/**
+ * The files that are not the same in two commits: changed, added or removed.
+ * Paths are counted from the top of the repository and use forward slashes.
+ * A renamed file shows up under both names. Returns undefined when git could not compare.
+ */
+export function differingFiles(root: string, from: string, to: string): string[] | undefined {
+  const result = git(['diff', '--name-only', '--no-renames', '-z', from, to, '--'], root);
+  if (!result.ok) return undefined;
+  return result.stdout.split('\0').filter((path) => path !== '');
+}
+
+/** True when `older` is `newer` itself or part of its history. */
+export function isAncestor(root: string, older: string, newer: string): boolean {
+  return git(['merge-base', '--is-ancestor', older, newer], root).ok;
+}
+
 export type MergedTree =
   | { readonly kind: 'clean'; readonly tree: string }
   | { readonly kind: 'conflict' }

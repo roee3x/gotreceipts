@@ -1,7 +1,7 @@
-import { git, refCommit, remotes } from '../git.ts';
+import { differingFiles, git, isAncestor, refCommit, remotes } from '../git.ts';
 import { policyId } from './hash.ts';
 import { parsePolicy } from './parse.ts';
-import { POLICY_FILE_NAME, type Policy } from './policy.ts';
+import { isProtectedPath, POLICY_FILE_NAME, type Policy } from './policy.ts';
 
 /**
  * Which policy a commit is judged by.
@@ -66,6 +66,16 @@ export type PolicySource =
       readonly commit: string;
       /** True when the commit that wants in holds another policy than the target does, or none. */
       readonly changedByCommit: boolean;
+      /**
+       * The protected files that would no longer be the same on the target branch if it pointed
+       * to this commit. Which files are protected is said by the target's policy.
+       */
+      readonly protectedChanged: readonly string[];
+      /**
+       * True when the target holds commits that this commit does not. Then a file in the list
+       * above may differ because of a change on the target, and not one made by this commit.
+       */
+      readonly behindTarget: boolean;
     }
   | {
       readonly kind: 'own';
@@ -106,10 +116,22 @@ export function policyFor(root: string, commit: string, target: Target | undefin
       if (onTarget.kind === 'policy') {
         const own = target.commit === commit ? onTarget : policyInCommit(root, commit);
         const changedByCommit = own.kind !== 'policy' || policyId(own.policy) !== policyId(onTarget.policy);
+
+        // The two commits are compared file by file, not through their history. So a commit
+        // that takes the branch back to an older state of a protected file is seen as well.
+        const differing = target.commit === commit ? [] : differingFiles(root, target.commit, commit);
+        if (differing === undefined) {
+          return {
+            ok: false,
+            errors: [`git could not compare commit ${commit.slice(0, 7)} with ${target.shown}, so the protected files could not be checked`],
+          };
+        }
+        const protectedChanged = differing.filter((path) => isProtectedPath(onTarget.policy, path));
+        const behindTarget = protectedChanged.length > 0 && !isAncestor(root, target.commit, commit);
         return {
           ok: true,
           policy: onTarget.policy,
-          source: { kind: 'target', shown: target.shown, commit: target.commit, changedByCommit },
+          source: { kind: 'target', shown: target.shown, commit: target.commit, changedByCommit, protectedChanged, behindTarget },
         };
       }
       because = `${target.shown} holds no policy file yet`;
@@ -128,8 +150,9 @@ export function policyFor(root: string, commit: string, target: Target | undefin
 }
 
 /**
- * Says which policy was used, for the output of every command: one line, and a second one
- * when the commit tried to change the policy it is judged by.
+ * Says which policy was used, for the output of every command: one line, then a line when the
+ * commit tried to change the policy it is judged by, and a line that names the protected files
+ * that would change on the target.
  */
 export function sourceLines(source: PolicySource): string[] {
   if (source.kind === 'own') {
@@ -139,5 +162,28 @@ export function sourceLines(source: PolicySource): string[] {
   if (source.changedByCommit) {
     lines.push(`this commit changes the policy file. It is judged by the policy that is already on ${source.shown}`);
   }
+  if (source.protectedChanged.length > 0) {
+    lines.push(protectedLine(source.protectedChanged, source.shown));
+    if (source.behindTarget) {
+      lines.push(`${source.shown} holds commits this one does not, so a file may be listed because of a change made there`);
+    }
+  }
   return lines;
+}
+
+/** How many names of protected files are written out before the rest is only counted. */
+const NAMES_SHOWN = 5;
+
+/**
+ * "1 protected file is not the same as on origin/main: a", or
+ * "7 protected files are not the same as on origin/main: a, b, c, d, e and 2 more".
+ *
+ * The wording is about the two states, not about who changed what. That is all a comparison
+ * of two commits can say, and it is what matters: the file would change on the target branch.
+ */
+export function protectedLine(files: readonly string[], shown: string): string {
+  const names = files.slice(0, NAMES_SHOWN).join(', ');
+  const rest = files.length > NAMES_SHOWN ? ` and ${files.length - NAMES_SHOWN} more` : '';
+  const count = files.length === 1 ? '1 protected file is' : `${files.length} protected files are`;
+  return `${count} not the same as on ${shown}: ${names}${rest}`;
 }

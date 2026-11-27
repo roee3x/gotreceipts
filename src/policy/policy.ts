@@ -52,6 +52,13 @@ export interface Policy {
     /** A record older than this no longer counts. */
     readonly maxAgeHours: number;
   };
+  /**
+   * Files that are part of the gate itself, as paths from the top of the repository.
+   * `*` stands for any run of characters, and a folder stands for everything in it.
+   * The policy file is always protected, whether it is listed or not.
+   * Left out when the policy lists none, so that writing an empty list changes nothing.
+   */
+  readonly protected?: readonly string[];
 }
 
 export const POLICY_FILE_NAME = 'gotreceipts.json';
@@ -70,9 +77,27 @@ export function levelRank(policy: Policy, levelName: string): number {
   return policy.levels.findIndex((level) => level.name === levelName);
 }
 
+function escapePattern(pattern: string): string {
+  return pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+}
+
 function patternToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-  return new RegExp(`^${escaped}$`);
+  return new RegExp(`^${escapePattern(pattern)}$`);
+}
+
+/** Every pattern of protected files: the policy file first, then what the policy lists. */
+export function protectedPatterns(policy: Pick<Policy, 'protected'>): readonly string[] {
+  return [POLICY_FILE_NAME, ...(policy.protected ?? []).filter((pattern) => pattern !== POLICY_FILE_NAME)];
+}
+
+/**
+ * True when a file is protected. `path` is counted from the top of the repository, with forward slashes.
+ *
+ * Upper and lower case are not told apart. On Windows and macOS two spellings name one file,
+ * and a guard that can be passed by changing a capital letter is no guard. Too wide is the safe side here.
+ */
+export function isProtectedPath(policy: Pick<Policy, 'protected'>, path: string): boolean {
+  return protectedPatterns(policy).some((pattern) => new RegExp(`^${escapePattern(pattern)}(?:/.*)?$`, 'i').test(path));
 }
 
 /** The first tier whose pattern matches the branch, or undefined when no tier covers it. */

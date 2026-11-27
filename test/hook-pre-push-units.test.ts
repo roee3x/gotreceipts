@@ -67,7 +67,18 @@ test('a line of another shape is an error, never a guess', () => {
 function fromTarget(entering: Entering): PolicyChoice {
   return entering.targetCommit === undefined
     ? { ok: true, policy: POLICY, source: { kind: 'own', commit: entering.commit, because: `"${entering.branch}" does not exist yet` } }
-    : { ok: true, policy: POLICY, source: { kind: 'target', shown: 'the remote', commit: entering.targetCommit, changedByCommit: false } };
+    : {
+        ok: true,
+        policy: POLICY,
+        source: {
+          kind: 'target',
+          shown: 'the remote',
+          commit: entering.targetCommit,
+          changedByCommit: false,
+          protectedChanged: [],
+          behindTarget: false,
+        },
+      };
 }
 
 test('a commit entering a branch with a level needs a record at that level', () => {
@@ -106,11 +117,19 @@ test('a commit that changes the policy is told that the change does not count', 
   const step = planPush([pushed('refs/heads/main')], (entering) => ({
     ok: true,
     policy: POLICY,
-    source: { kind: 'target', shown: '"main" on the remote', commit: entering.targetCommit ?? '', changedByCommit: true },
+    source: {
+      kind: 'target',
+      shown: '"main" on the remote',
+      commit: entering.targetCommit ?? '',
+      changedByCommit: true,
+      protectedChanged: ['gotreceipts.json', 'ci/build.yml'],
+      behindTarget: false,
+    },
   }))[0];
   assert.equal(step?.kind, 'check');
   assert.deepEqual(step?.kind === 'check' ? step.notes : [], [
     'this commit changes the policy file. It is judged by the policy that is already on "main" on the remote',
+    '2 protected files are not the same as on "main" on the remote: gotreceipts.json, ci/build.yml',
   ]);
 });
 
