@@ -6,7 +6,7 @@ import type { Io } from '../main.ts';
 import { policyFor, type PolicyChoice, type PolicySource } from '../policy/committed.ts';
 import type { Policy } from '../policy/policy.ts';
 import { countOf } from '../travel/receipt.ts';
-import { sendReceipts } from '../travel/remote.ts';
+import { sendReceipts, type Sent } from '../travel/remote.ts';
 
 /**
  * The pre-push hook. Git calls it before a push and gives it, as text, what the push would change.
@@ -179,8 +179,13 @@ function plural(count: number, one: string, many: string): string {
  */
 function send(root: string, io: Io, passed: readonly Judged[], remote: string | undefined, now: number): void {
   for (const step of passed) {
-    if (step.policy.travel !== true || remote === undefined) continue;
-    const sent = sendReceipts(root, remote, step.commit, now);
+    if (step.policy.travel !== true) continue;
+    // Git gives the hook the remote as its first argument. A hook file that does not pass it
+    // on leaves the tool without it. Then nothing can be sent, and that is said, not passed over.
+    const sent: Sent =
+      remote === undefined
+        ? { kind: 'error', reason: 'the hook was not told which remote the push goes to' }
+        : sendReceipts(root, remote, step.commit, now);
     if (sent.kind === 'sent') io.out(`  ${step.branch}: sent to the remote: ${countOf(sent.sent)}`);
     if (sent.kind === 'error') {
       io.out(`  ${step.branch}: NOT SENT to the remote: ${sent.reason}`);

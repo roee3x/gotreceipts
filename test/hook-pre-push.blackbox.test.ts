@@ -154,6 +154,26 @@ test('input the hook does not understand blocks the push', (t) => {
   assert.match(result.stderr, /CANNOT CHECK: git gave a line this hook does not understand/);
 });
 
+test('with "travel", a hook that was not told the remote says that nothing was sent, and still lets the push through', (t) => {
+  const repo = tempRepo(t, { policy: { ...POLICY, travel: true } });
+  assert.equal(runCli(repo, ['gate']).status, 0);
+  const commit = head(repo);
+
+  // Git gives the hook the remote as its first argument. A hook file that does not pass it on leaves it out.
+  const result = runCli(repo, ['hook', 'pre-push'], {}, pushLine(commit, 'feature/thing'));
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /\n {2}feature\/thing: NOT SENT to the remote: the hook was not told which remote the push goes to\n/);
+  assert.ok(result.stdout.includes(`\n      Send it after the push: gotreceipts send ${commit.slice(0, 7)}\n`), result.stdout);
+  assert.equal(lastLine(result.stdout), 'VERDICT: PASS (1 pushed commit has a valid record)');
+
+  // Without "travel" nothing is sent anywhere, so there is nothing to say about it.
+  const stays = tempRepo(t, { policy: POLICY });
+  assert.equal(runCli(stays, ['gate']).status, 0);
+  const quiet = runCli(stays, ['hook', 'pre-push'], {}, pushLine(head(stays), 'feature/thing'));
+  assert.equal(quiet.status, 0, quiet.stdout + quiet.stderr);
+  assert.doesNotMatch(quiet.stdout, /NOT SENT|sent to the remote/);
+});
+
 test('an unknown hook name, or none, is "could not run"', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   assert.equal(runCli(repo, ['hook']).status, 2);
