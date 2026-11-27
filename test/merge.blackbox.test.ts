@@ -517,7 +517,7 @@ test('without "travel", the merge asks the remote for nothing and sends nothing'
   assert.equal(receiptsOnRemote(s), '');
 });
 
-test('with "travel", nothing is merged when the record and the approval cannot be sent', (t) => {
+test('with "travel", a merge whose record cannot be sent still happens, and says loudly what is missing', (t) => {
   const owner = testKey(t);
   const s = scene(t, 'main', true, travelPolicy(owner));
   // A server that takes branches, and refuses the name the records are kept under.
@@ -529,13 +529,15 @@ test('with "travel", nothing is merged when the record and the approval cannot b
   assert.equal(approved.status, 0, approved.stdout + approved.stderr);
   assert.match(approved.stdout, /\n {2}NOT SENT to the remote: /);
 
+  // The door was opened by what this clone holds. Sending is not a check, so the merge goes on.
   const result = runCli(s.repo, ['merge', '7'], s.env);
-  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /approved by owner, 0\.0 hours ago/);
-  assert.match(
-    result.stderr,
-    new RegExp(`CANNOT RUN: the records and approvals of commit ${s.head.slice(0, 7)} could not be sent to "origin": .*\\. Nothing was merged`),
+  assert.match(result.stdout, /\n {2}NOT SENT to origin: /);
+  assert.ok(
+    result.stdout.includes(`  an audit on the remote will not find them. Send them: gotreceipts send ${s.head.slice(0, 7)}`),
+    result.stdout,
   );
-  assert.deepEqual(s.mergeRequests(), []);
+  assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${s.head.slice(0, 7)} into main)`);
   assert.equal(receiptsOnRemote(s), '');
 });

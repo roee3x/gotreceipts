@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 
 import { approvalText, newApproval } from '../src/approval/statement.ts';
-import { addRemote, gitIn, lastLine, runCli, tempRepo, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
+import { addRemote, cliPath, gitIn, lastLine, runCli, tempRepo, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
 
 /**
  * develop needs a record. main also asks for an approval of every commit. One signer, "owner".
@@ -397,6 +397,46 @@ test('with "travel" in the policy, "approve" sends the approval, and says so whe
   assert.equal(runCli(s.first, ['verify', '--for', 'main']).status, 0);
 });
 
+test('with "travel", the push hook sends the record of what it lets through, and a failed sending does not stop the push', (t) => {
+  const s = scene(t, { travel: true });
+  writeIn(s.first, 'data.txt', 'changed\n');
+  assert.equal(gitIn(s.first, 'commit', '--quiet', '--all', '-m', 'test: a change').status, 0);
+  assert.equal(runCli(s.first, ['gate', '--level', 'G0']).status, 0);
+  const commit = gitIn(s.first, 'rev-parse', 'HEAD').stdout.trim();
+  chmodSync(
+    writeIn(s.first, '.git/hooks/pre-push', `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${cliPath.replace(/\\/g, '/')}" hook pre-push "$@"\n`),
+    0o755,
+  );
+
+  const pushed = gitIn(s.first, 'push', 'origin', 'feature/thing:develop');
+  assert.equal(pushed.status, 0, pushed.stdout + pushed.stderr);
+  assert.match(pushed.stdout + pushed.stderr, /develop: sent to the remote: 1 record/);
+  assert.notEqual(onRemote(s, commit), '');
+  assert.equal(gitIn(s.remote, 'rev-parse', 'refs/heads/develop').stdout.trim(), commit);
+
+  // The same push again sends nothing new, and says nothing about it.
+  const again = gitIn(s.first, 'push', 'origin', 'feature/thing:feature/thing');
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.doesNotMatch(again.stdout + again.stderr, /sent to the remote|NOT SENT/);
+
+  // A server that takes branches and refuses the name the records are kept under.
+  chmodSync(
+    writeIn(s.remote, 'hooks/update', '#!/bin/sh\ncase "$1" in\n  refs/gotreceipts/*) echo "that name is not allowed here" >&2; exit 1 ;;\nesac\nexit 0\n'),
+    0o755,
+  );
+  writeIn(s.first, 'data.txt', 'changed again\n');
+  assert.equal(gitIn(s.first, 'commit', '--quiet', '--all', '-m', 'test: another change').status, 0);
+  assert.equal(runCli(s.first, ['gate', '--level', 'G0']).status, 0);
+  const next = gitIn(s.first, 'rev-parse', 'HEAD').stdout.trim();
+
+  const refused = gitIn(s.first, 'push', 'origin', 'feature/thing:develop');
+  assert.equal(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stdout + refused.stderr, /develop: NOT SENT to the remote: /);
+  assert.ok((refused.stdout + refused.stderr).includes(`Send it after the push: gotreceipts send ${next.slice(0, 7)}`), refused.stderr);
+  assert.equal(gitIn(s.remote, 'rev-parse', 'refs/heads/develop').stdout.trim(), next);
+  assert.equal(onRemote(s, next), '');
+});
+
 test('"policy" and "doctor" say whether records and approvals travel', (t) => {
   const stays = scene(t);
   assert.match(runCli(stays.first, ['policy']).stdout, /\nRecords and approvals stay in this clone, unless someone runs "gotreceipts send"\.\n/);
@@ -408,10 +448,10 @@ test('"policy" and "doctor" say whether records and approvals travel', (t) => {
   const travels = scene(t, { travel: true });
   assert.match(
     runCli(travels.first, ['policy']).stdout,
-    /\nRecords and approvals travel: "approve" and "merge" send them to the remote, and "merge" asks the remote for them\.\n/,
+    /\nRecords and approvals travel: a push, "approve" and "merge" send them to the remote, and "merge" asks the remote for them\.\n/,
   );
   assert.match(
     runCli(travels.first, ['doctor']).stdout,
-    /\n {2}records\s+TRAVEL: "approve" and "merge" send records and approvals to the remote\n\s+another clone gets them with "gotreceipts fetch"\n/,
+    /\n {2}records\s+TRAVEL: a push, "approve" and "merge" send records and approvals to the remote\n\s+another clone gets them with "gotreceipts fetch", and "gotreceipts audit" reads them there\n/,
   );
 });

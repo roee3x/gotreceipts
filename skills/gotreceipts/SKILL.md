@@ -57,5 +57,6 @@ What the common answers mean:
 | `gotreceipts merge <number>` | Merges a pull request, only when its commit has its record |
 | `gotreceipts send [commit]` | Sends the records and approvals this clone holds for a commit to the remote, for another clone or for CI. It changes no branch |
 | `gotreceipts fetch [commit]` | Gets the records and approvals the remote holds for a commit. Whether they count is still for `verify` to say |
+| `gotreceipts audit <branch>` | Looks back at what entered a branch, and says whether each entry had its record and its approval. It runs in CI and changes nothing. When it fails, tell the user what it names. Do not try to repair it with a record made afterwards |
 | `gotreceipts policy --for <branch>` | Shows the policy a commit must pass to enter that branch: the levels, their checks, which branch needs which level, and the protected files |
 | `gotreceipts doctor` | Shows what is enforced in this clone, and what is not |

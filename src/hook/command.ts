@@ -10,7 +10,9 @@ export const HOOK_USAGE = [
   '',
   'Hooks:',
   '  pre-push      Called by git before a push. Refuses the push when a commit that would enter',
-  '                a branch with a gate level has no valid record at that level.',
+  '                a branch with a gate level has no valid record at that level, or lacks an',
+  '                approval it needs. When the policy says "travel": true, it also sends the',
+  '                records of what it let through to the remote.',
   '  claude-code   Called by Claude Code before it runs a shell command or edits a file. Stops',
   '                the few commands that go around the gate, such as a bare "gh pr merge", and',
   '                names the command to use instead. Before an edit of a protected file, it',
@@ -41,8 +43,9 @@ export async function hookCommand(args: readonly string[], io: Io): Promise<Exit
   }
 
   if (name === 'pre-push') {
-    // Git also passes the name and the address of the remote. The decision does not depend on them.
-    return prePush(await readStdin(), io, Date.now());
+    // Git also passes the name and the address of the remote. The decision does not depend on
+    // them. The name is only used afterwards, to send the records of what was let through.
+    return prePush(await readStdin(), io, Date.now(), args[1]);
   }
 
   if (name === 'claude-code') {

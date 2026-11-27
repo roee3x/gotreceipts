@@ -1,4 +1,5 @@
 import { approveCommand } from './approval/command.ts';
+import { auditCommand } from './audit/command.ts';
 import { EXIT, type ExitCode } from './exit-codes.ts';
 import { gateCommand } from './gate/command.ts';
 import { hookCommand } from './hook/command.ts';
@@ -21,6 +22,7 @@ export const USAGE = [
   '',
   'Commands:',
   '  approve          Sign an approval of one commit into one branch. For a person, not an agent',
+  '  audit            Look back at what entered a branch, and say whether each entry had its record',
   '  doctor           Report what is enforced in this clone, and what is not',
   '  fetch            Get the records and approvals the remote holds for a commit',
   '  gate             Run the checks of a gate level on the current commit',
@@ -106,6 +108,10 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
 
   if (command === 'approve') {
     return approveCommand(rest, io);
+  }
+
+  if (command === 'audit') {
+    return auditCommand(rest, io);
   }
 
   if (command === 'send') {
