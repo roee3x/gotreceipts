@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +64,17 @@ function allowedSigners(signers: readonly Signer[]): string {
   return signers.map((signer) => `${signer.name} namespaces="${APPROVAL_NAMESPACE}" ${signer.key}\n`).join('');
 }
 
+/** How one run of the program went: it did not start, or it ended well or badly and printed something. */
+type Ran = { readonly started: false; readonly why: string } | { readonly started: true; readonly ok: boolean; readonly printed: string };
+
+/** Runs the program and waits for it. `input` is what it reads, when it is given something to read. */
+function run(program: string, args: readonly string[], input?: Buffer): Ran {
+  const options: SpawnSyncOptionsWithStringEncoding = { encoding: 'utf8', windowsHide: true, ...(input === undefined ? {} : { input }) };
+  const result = spawnSync(program, [...args], options);
+  if (result.error !== undefined) return { started: false, why: whyNotStarted(result.error) };
+  return { started: true, ok: result.status === 0, printed: result.stdout };
+}
+
 /**
  * Checks a signature over `statement` against the keys of `signers`.
  *
@@ -83,24 +94,17 @@ export function checkSignature(signers: readonly Signer[], statement: Buffer, si
     writeFileSync(allowed, allowedSigners(signers));
 
     // 1. Whose key made the signature? This only looks at the key, not yet at what was signed.
-    const found = spawnSync(program, ['-Y', 'find-principals', '-s', signatureFile, '-f', allowed], {
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    if (found.error !== undefined) return { kind: 'cannot-check', reason: whyNotStarted(found.error) };
-    const signer = found.status === 0 ? found.stdout.split(/\r?\n/)[0]?.trim() : undefined;
+    const found = run(program, ['-Y', 'find-principals', '-s', signatureFile, '-f', allowed]);
+    if (!found.started) return { kind: 'cannot-check', reason: found.why };
+    const signer = found.ok ? found.printed.split(/\r?\n/)[0]?.trim() : undefined;
     if (signer === undefined || !signers.some((listed) => listed.name === signer)) {
       return { kind: 'bad', reason: 'it was not signed by a key the policy lists' };
     }
 
     // 2. Is it a signature of exactly these bytes, made as an approval?
-    const verified = spawnSync(program, ['-Y', 'verify', '-f', allowed, '-I', signer, '-n', APPROVAL_NAMESPACE, '-s', signatureFile], {
-      input: statement,
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    if (verified.error !== undefined) return { kind: 'cannot-check', reason: whyNotStarted(verified.error) };
-    if (verified.status !== 0) return { kind: 'bad', reason: 'its signature does not fit its text' };
+    const verified = run(program, ['-Y', 'verify', '-f', allowed, '-I', signer, '-n', APPROVAL_NAMESPACE, '-s', signatureFile], statement);
+    if (!verified.started) return { kind: 'cannot-check', reason: verified.why };
+    if (!verified.ok) return { kind: 'bad', reason: 'its signature does not fit its text' };
     return { kind: 'good', signer };
   } finally {
     rmSync(folder, { recursive: true, force: true });
