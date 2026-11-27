@@ -1,3 +1,7 @@
+import { isUtcTime } from '../clock.ts';
+import { isFullId } from '../git.ts';
+import { isObject } from '../json.ts';
+
 /**
  * The approval: one sentence, written as a small file and signed.
  *
@@ -27,10 +31,6 @@ export interface Approval {
  */
 export const APPROVAL_NAMESPACE = 'gotreceipts-approval';
 
-const SHA = /^[0-9a-f]{40,64}$/;
-const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const KEYS = ['schema', 'kind', 'tool', 'commit', 'branch', 'approvedAt'];
-
 export function newApproval(commit: string, branch: string, version: string, now: number): Approval {
   return {
     schema: 1,
@@ -51,33 +51,32 @@ export type ApprovalParse =
   | { readonly ok: true; readonly approval: Approval }
   | { readonly ok: false; readonly error: string };
 
+const ENTRIES = ['schema', 'kind', 'tool', 'commit', 'branch', 'approvedAt'];
+
 /** Reads an approval. Strict, like the reader of the policy: anything unexpected is an error. */
 export function parseApproval(text: string): ApprovalParse {
+  const not = (error: string): ApprovalParse => ({ ok: false, error });
+
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return { ok: false, error: 'it is not valid JSON' };
+    return not('it is not valid JSON');
   }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ok: false, error: 'it does not hold a JSON object' };
-  const value = raw as Record<string, unknown>;
+  if (!isObject(raw)) return not('it does not hold a JSON object');
 
-  const unknown = Object.keys(value).find((key) => !KEYS.includes(key));
-  if (unknown !== undefined) return { ok: false, error: `it holds an unknown entry, "${unknown}"` };
-  if (value['schema'] !== 1) return { ok: false, error: 'its schema number is not 1' };
-  if (value['kind'] !== 'approval') return { ok: false, error: 'it is not an approval' };
+  const unknown = Object.keys(raw).find((key) => !ENTRIES.includes(key));
+  if (unknown !== undefined) return not(`it holds an unknown entry, "${unknown}"`);
+  if (raw['schema'] !== 1) return not('its schema number is not 1');
+  if (raw['kind'] !== 'approval') return not('it is not an approval');
 
-  const tool = value['tool'];
-  if (typeof tool !== 'object' || tool === null || Array.isArray(tool)) return { ok: false, error: 'it does not say which tool wrote it' };
-  const { name, version } = tool as Record<string, unknown>;
-  if (name !== 'gotreceipts' || typeof version !== 'string') return { ok: false, error: 'it does not say which tool wrote it' };
-
-  const { commit, branch, approvedAt } = value;
-  if (typeof commit !== 'string' || !SHA.test(commit)) return { ok: false, error: 'it does not name a commit by its full id' };
-  if (typeof branch !== 'string' || branch === '') return { ok: false, error: 'it does not name a branch' };
-  if (typeof approvedAt !== 'string' || !TIME.test(approvedAt) || Number.isNaN(Date.parse(approvedAt))) {
-    return { ok: false, error: 'it does not say when it was given' };
+  const { tool, commit, branch, approvedAt } = raw;
+  if (!isObject(tool) || tool['name'] !== 'gotreceipts' || typeof tool['version'] !== 'string') {
+    return not('it does not say which tool wrote it');
   }
+  if (typeof commit !== 'string' || !isFullId(commit)) return not('it does not name a commit by its full id');
+  if (typeof branch !== 'string' || branch === '') return not('it does not name a branch');
+  if (typeof approvedAt !== 'string' || !isUtcTime(approvedAt)) return not('it does not say when it was given');
 
-  return { ok: true, approval: { schema: 1, kind: 'approval', tool: { name: 'gotreceipts', version }, commit, branch, approvedAt } };
+  return { ok: true, approval: { schema: 1, kind: 'approval', tool: { name: 'gotreceipts', version: tool['version'] }, commit, branch, approvedAt } };
 }

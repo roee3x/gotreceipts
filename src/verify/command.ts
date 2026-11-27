@@ -1,12 +1,11 @@
-import { parseArgs } from 'node:util';
-
 import { approvalAdvice, approvalLines, judgeApproval, type ApprovalDecision } from '../approval/judge.ts';
+import { shownAge } from '../clock.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { chooseLevel, targetBranch } from '../gate/command.ts';
-import { currentBranch, repoRoot, resolveCommit } from '../git.ts';
+import { currentBranch, repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
+import { commitAskedFor, readOptions } from '../options.ts';
 import { knownTarget, policyFor, sourceLines } from '../policy/committed.ts';
-import { shownAge } from './decide.ts';
 import { judgeCommit } from './judge.ts';
 
 export const VERIFY_USAGE = [
@@ -41,56 +40,24 @@ export const VERIFY_USAGE = [
 ].join('\n');
 
 export async function verifyCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  let options: { level?: string; for?: string; help?: boolean };
-  let positionals: string[];
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: {
-        level: { type: 'string' },
-        for: { type: 'string' },
-        help: { type: 'boolean', short: 'h' },
-      },
-      allowPositionals: true,
-      strict: true,
-    });
-    options = parsed.values;
-    positionals = parsed.positionals;
-  } catch (error) {
-    io.err(`gotreceipts verify: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(VERIFY_USAGE);
-    return EXIT.CANNOT_RUN;
-  }
-
-  if (options.help === true) {
-    io.out(VERIFY_USAGE);
-    return EXIT.PASS;
-  }
-
-  const cannotRun = (reason: string): ExitCode => {
-    io.err(`gotreceipts verify: CANNOT RUN: ${reason}`);
-    return EXIT.CANNOT_RUN;
-  };
+  const start = readOptions({ command: 'verify', usage: VERIFY_USAGE, values: ['level', 'for'], positionals: true }, args, io);
+  if (start.done) return start.code;
+  const { options, positionals, cannotRun } = start;
 
   if (positionals.length > 1) return cannotRun('name one commit, not several');
 
   const root = repoRoot(process.cwd());
   if (root === undefined) return cannotRun('this folder is not inside a git repository');
 
-  const wanted = positionals[0] ?? 'HEAD';
-  const commit = resolveCommit(root, wanted);
-  if (commit === undefined) {
-    return cannotRun(positionals[0] === undefined ? 'the repository has no commit yet' : `there is no commit "${wanted}"`);
-  }
+  const asked = commitAskedFor(root, positionals[0]);
+  if (!asked.ok) return cannotRun(asked.reason);
+  const { commit } = asked;
 
   // The policy: the one on the branch the commit wants to enter, not the commit's own copy.
   const branch = currentBranch(root);
   const target = targetBranch(options, branch);
   const picked = policyFor(root, commit, target === undefined ? undefined : knownTarget(root, target));
-  if (!picked.ok) {
-    for (const error of picked.errors) io.err(`gotreceipts verify: CANNOT RUN: ${error}`);
-    return EXIT.CANNOT_RUN;
-  }
+  if (!picked.ok) return cannotRun(...picked.errors);
   const { policy } = picked;
 
   const chosen = chooseLevel(policy, options, branch);
@@ -98,7 +65,7 @@ export async function verifyCommand(args: readonly string[], io: Io): Promise<Ex
 
   const { decision, unreadable } = judgeCommit(root, policy, commit, chosen.level, Date.now());
 
-  const shortCommit = commit.slice(0, 7);
+  const shortCommit = shortId(commit);
   io.out(`gotreceipts verify: commit ${shortCommit} needs level ${chosen.level}`);
   const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
   io.out(`  policy: ${policyLine}`);

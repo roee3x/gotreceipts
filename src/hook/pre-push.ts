@@ -1,17 +1,13 @@
 import { approvalLines, judgeApproval, type ApprovalDecision } from '../approval/judge.ts';
+import { shownAge } from '../clock.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { hasCommit, headCommit, repoRoot } from '../git.ts';
+import { BRANCH_PREFIX, hasCommit, headCommit, isFullId, isNoCommit, repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
 import { policyFor, sourceLines, type PolicyChoice, type PolicySource } from '../policy/committed.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
 import { countOf } from '../travel/receipts.ts';
 import { sendReceipts } from '../travel/remote.ts';
-import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
-
-/** What git writes in place of a commit id when there is none: a deleted or a new branch. */
-const NO_COMMIT = /^0+$/;
-const BRANCH_PREFIX = 'refs/heads/';
 
 /** One thing a push wants to change on the other side, as git describes it to the hook. */
 export interface PushedRef {
@@ -39,8 +35,8 @@ export function parsePushLines(
       remoteRef === undefined ||
       remoteSha === undefined ||
       extra.length > 0 ||
-      !/^[0-9a-f]{40,64}$/.test(localSha) ||
-      !/^[0-9a-f]{40,64}$/.test(remoteSha)
+      !isFullId(localSha) ||
+      !isFullId(remoteSha)
     ) {
       return { ok: false, error: `git gave a line this hook does not understand: "${trimmed}"` };
     }
@@ -88,10 +84,10 @@ export function planPush(refs: readonly PushedRef[], policyOf: (entering: Enteri
       return { kind: 'skip', name: ref.remoteRef, reason: 'not a branch' };
     }
     const branch = ref.remoteRef.slice(BRANCH_PREFIX.length);
-    if (NO_COMMIT.test(ref.localSha)) {
+    if (isNoCommit(ref.localSha)) {
       return { kind: 'skip', name: branch, reason: 'the branch is being deleted, so no commit enters it' };
     }
-    const targetCommit = NO_COMMIT.test(ref.remoteSha) ? undefined : ref.remoteSha;
+    const targetCommit = isNoCommit(ref.remoteSha) ? undefined : ref.remoteSha;
     const picked = policyOf({ branch, commit: ref.localSha, targetCommit });
     if (!picked.ok) return { kind: 'error', name: branch, errors: picked.errors };
 
@@ -144,13 +140,13 @@ export function prePush(input: string, io: Io, now: number, remote?: string): Ex
   // is read from that commit, so it is the remote's own, not what this clone remembers of it.
   const steps = planPush(parsed.refs, ({ branch, commit, targetCommit }): PolicyChoice => {
     if (!hasCommit(root, commit)) {
-      return { ok: false, errors: [`this clone does not hold commit ${commit.slice(0, 7)}, which the push names`] };
+      return { ok: false, errors: [`this clone does not hold commit ${shortId(commit)}, which the push names`] };
     }
     if (targetCommit !== undefined && !hasCommit(root, targetCommit)) {
       return {
         ok: false,
         errors: [
-          `"${branch}" on the remote is at commit ${targetCommit.slice(0, 7)}, which this clone does not hold, so its policy cannot be read. Run "git fetch" and push again`,
+          `"${branch}" on the remote is at commit ${shortId(targetCommit)}, which this clone does not hold, so its policy cannot be read. Run "git fetch" and push again`,
         ],
       };
     }
@@ -184,7 +180,7 @@ export function prePush(input: string, io: Io, now: number, remote?: string): Ex
       io.out(`  ${step.name}: not checked (${step.reason})`);
       continue;
     }
-    const shortCommit = step.commit.slice(0, 7);
+    const shortCommit = shortId(step.commit);
     const { decision, unreadable } = judgeCommit(root, step.policy, step.commit, step.level, now);
     const approval: ApprovalDecision = approvals.get(step) ?? { kind: 'not-needed' };
     const subject = `  ${step.branch}: commit ${shortCommit} needs level ${step.level}`;
@@ -219,7 +215,7 @@ export function prePush(input: string, io: Io, now: number, remote?: string): Ex
       if (sent.kind === 'sent') io.out(`  ${step.branch}: sent to the remote: ${countOf(sent.sent)}`);
       if (sent.kind === 'error') {
         io.out(`  ${step.branch}: NOT SENT to the remote: ${sent.reason}`);
-        io.out(`      Send it after the push: gotreceipts send ${step.commit.slice(0, 7)}`);
+        io.out(`      Send it after the push: gotreceipts send ${shortId(step.commit)}`);
       }
     }
     io.out(

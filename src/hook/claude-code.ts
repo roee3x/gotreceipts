@@ -6,6 +6,7 @@ import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { headCommit, repoRoot } from '../git.ts';
 import { startLine } from '../install/hook-script.ts';
 import { currentLauncher } from '../install/hooks.ts';
+import { isObject, type JsonObject } from '../json.ts';
 import type { Io } from '../main.ts';
 import { policyInCommit } from '../policy/committed.ts';
 import { isProtectedPath } from '../policy/policy.ts';
@@ -38,12 +39,6 @@ import { isProtectedPath } from '../policy/policy.ts';
  * It also sees only the edit tools. A protected file that is changed by a shell command is not
  * noticed here. It is noticed at the door, where the commit is compared with its target branch.
  */
-
-type Json = Record<string, unknown>;
-
-function isObject(value: unknown): value is Json {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function answer(io: Io, decision: 'deny' | 'ask', reason: string): ExitCode {
   io.out(
@@ -128,7 +123,7 @@ function checkEdit(file: string, cwd: string, io: Io): ExitCode {
 }
 
 export function claudeCodeHook(input: string, io: Io): ExitCode {
-  let toolInput: Json = {};
+  let toolInput: JsonObject = {};
   let cwd = process.cwd();
   try {
     const parsed: unknown = JSON.parse(input);

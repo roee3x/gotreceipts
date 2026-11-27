@@ -1,4 +1,4 @@
-import { differingFiles, git, isAncestor, refCommit, remotes } from '../git.ts';
+import { branchRef, differingFiles, git, isAncestor, refCommit, remotes, shortId } from '../git.ts';
 import { policyId } from './hash.ts';
 import { parsePolicy } from './parse.ts';
 import { isProtectedPath, POLICY_FILE_NAME, type Policy } from './policy.ts';
@@ -55,7 +55,7 @@ export function knownTarget(root: string, branch: string): Target {
     const commit = refCommit(root, `refs/remotes/${remote}/${branch}`);
     if (commit !== undefined) return { branch, commit, shown: `${remote}/${branch}` };
   }
-  return { branch, commit: refCommit(root, `refs/heads/${branch}`), shown: branch };
+  return { branch, commit: refCommit(root, branchRef(branch)), shown: branch };
 }
 
 /** Where the policy that was used came from. */
@@ -100,53 +100,68 @@ export type PolicyChoice =
  * Otherwise a branch could break the policy on purpose to get rid of it.
  */
 export function policyFor(root: string, commit: string, target: Target | undefined): PolicyChoice {
-  let because: string | undefined;
+  if (target === undefined) return fromTheCommitItself(root, commit, undefined);
+  if (target.commit === undefined) return fromTheCommitItself(root, commit, `"${target.branch}" does not exist yet`);
 
-  if (target !== undefined) {
-    if (target.commit === undefined) {
-      because = `"${target.branch}" does not exist yet`;
-    } else {
-      const onTarget = policyInCommit(root, target.commit);
-      if (onTarget.kind === 'invalid') {
-        return {
-          ok: false,
-          errors: onTarget.errors.map((error) => `the policy on ${target.shown} is not valid: ${POLICY_FILE_NAME}: ${error}`),
-        };
-      }
-      if (onTarget.kind === 'policy') {
-        const own = target.commit === commit ? onTarget : policyInCommit(root, commit);
-        const changedByCommit = own.kind !== 'policy' || policyId(own.policy) !== policyId(onTarget.policy);
-
-        // The two commits are compared file by file, not through their history. So a commit
-        // that takes the branch back to an older state of a protected file is seen as well.
-        const differing = target.commit === commit ? [] : differingFiles(root, target.commit, commit);
-        if (differing === undefined) {
-          return {
-            ok: false,
-            errors: [`git could not compare commit ${commit.slice(0, 7)} with ${target.shown}, so the protected files could not be checked`],
-          };
-        }
-        const protectedChanged = differing.filter((path) => isProtectedPath(onTarget.policy, path));
-        const behindTarget = protectedChanged.length > 0 && !isAncestor(root, target.commit, commit);
-        return {
-          ok: true,
-          policy: onTarget.policy,
-          source: { kind: 'target', shown: target.shown, commit: target.commit, changedByCommit, protectedChanged, behindTarget },
-        };
-      }
-      because = `${target.shown} holds no policy file yet`;
-    }
+  const onTarget = policyInCommit(root, target.commit);
+  switch (onTarget.kind) {
+    case 'invalid':
+      return {
+        ok: false,
+        errors: onTarget.errors.map((error) => `the policy on ${target.shown} is not valid: ${POLICY_FILE_NAME}: ${error}`),
+      };
+    case 'none':
+      return fromTheCommitItself(root, commit, `${target.shown} holds no policy file yet`);
+    case 'policy':
+      return fromTheTarget(root, commit, { commit: target.commit, shown: target.shown }, onTarget.policy);
   }
+}
 
-  const short = commit.slice(0, 7);
+/** The usual case: the target branch holds a policy, and that one counts. */
+function fromTheTarget(
+  root: string,
+  commit: string,
+  target: { readonly commit: string; readonly shown: string },
+  policy: Policy,
+): PolicyChoice {
+  const isTheTarget = target.commit === commit;
+
+  const own = isTheTarget ? undefined : policyInCommit(root, commit);
+  const changedByCommit = own !== undefined && (own.kind !== 'policy' || policyId(own.policy) !== policyId(policy));
+
+  // The two commits are compared file by file, not through their history. So a commit that
+  // takes the branch back to an older state of a protected file is seen as well.
+  const differing = isTheTarget ? [] : differingFiles(root, target.commit, commit);
+  if (differing === undefined) {
+    return {
+      ok: false,
+      errors: [`git could not compare commit ${shortId(commit)} with ${target.shown}, so the protected files could not be checked`],
+    };
+  }
+  const protectedChanged = differing.filter((path) => isProtectedPath(policy, path));
+  const behindTarget = protectedChanged.length > 0 && !isAncestor(root, target.commit, commit);
+
+  return {
+    ok: true,
+    policy,
+    source: { kind: 'target', shown: target.shown, commit: target.commit, changedByCommit, protectedChanged, behindTarget },
+  };
+}
+
+/**
+ * The other case: there is no policy on a target to judge by, so the commit's own counts.
+ * `because` says why, for the output. Undefined when no target was named at all.
+ */
+function fromTheCommitItself(root: string, commit: string, because: string | undefined): PolicyChoice {
   const own = policyInCommit(root, commit);
-  if (own.kind === 'none') {
-    return { ok: false, errors: [`commit ${short} holds no policy file (${POLICY_FILE_NAME}). Only a committed policy counts`] };
+  switch (own.kind) {
+    case 'none':
+      return { ok: false, errors: [`commit ${shortId(commit)} holds no policy file (${POLICY_FILE_NAME}). Only a committed policy counts`] };
+    case 'invalid':
+      return { ok: false, errors: own.errors.map((error) => `commit ${shortId(commit)}: ${POLICY_FILE_NAME}: ${error}`) };
+    case 'policy':
+      return { ok: true, policy: own.policy, source: { kind: 'own', commit, because } };
   }
-  if (own.kind === 'invalid') {
-    return { ok: false, errors: own.errors.map((error) => `commit ${short}: ${POLICY_FILE_NAME}: ${error}`) };
-  }
-  return { ok: true, policy: own.policy, source: { kind: 'own', commit, because } };
 }
 
 /**
@@ -158,7 +173,7 @@ export function sourceLines(source: PolicySource): string[] {
   if (source.kind === 'own') {
     return [source.because === undefined ? 'the one in this commit' : `the one in this commit, because ${source.because}`];
   }
-  const lines = [`the one on ${source.shown}, at commit ${source.commit.slice(0, 7)}`];
+  const lines = [`the one on ${source.shown}, at commit ${shortId(source.commit)}`];
   if (source.changedByCommit) {
     lines.push(`this commit changes the policy file. It is judged by the policy that is already on ${source.shown}`);
   }

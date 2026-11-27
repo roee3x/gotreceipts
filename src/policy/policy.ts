@@ -1,6 +1,6 @@
 /**
- * The policy: what the gate runs, and which branch needs which level.
- * It lives in gotreceipts.json at the top of the repository.
+ * The policy: what the gate runs, which branch needs which level, which files are part of the
+ * gate itself, and who may approve. It lives in gotreceipts.json at the top of the repository.
  */
 
 /** A number the output must show, for example the count of tests that ran. */
@@ -94,42 +94,56 @@ export const DEFAULT_TIMEOUT_MINUTES = 30;
 export const DEFAULT_MAX_AGE_HOURS = 24;
 export const DEFAULT_APPROVAL_HOURS = 24;
 
-/** Every check a level runs: its own, and those of every level before it, in order. */
-export function checksForLevel(policy: Policy, levelName: string): readonly Check[] | undefined {
-  const index = policy.levels.findIndex((level) => level.name === levelName);
-  if (index === -1) return undefined;
-  return policy.levels.slice(0, index + 1).flatMap((level) => level.checks);
-}
+// --- levels ---
 
 /** The position of a level in the order, or -1 when there is no such level. */
 export function levelRank(policy: Policy, levelName: string): number {
   return policy.levels.findIndex((level) => level.name === levelName);
 }
 
-function escapePattern(pattern: string): string {
-  return pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+/** Every check a level runs: its own, and those of every level before it, in order. */
+export function checksForLevel(policy: Policy, levelName: string): readonly Check[] | undefined {
+  const rank = levelRank(policy, levelName);
+  if (rank === -1) return undefined;
+  return policy.levels.slice(0, rank + 1).flatMap((level) => level.checks);
 }
 
-function patternToRegExp(pattern: string): RegExp {
-  return new RegExp(`^${escapePattern(pattern)}$`);
+// --- patterns ---
+
+/**
+ * A pattern as a test. In a pattern, `*` stands for any run of characters, and every other
+ * character stands for itself.
+ *
+ * A branch pattern has to fit the whole name of the branch.
+ *
+ * A file pattern also fits everything inside what it names, so that a folder stands for its
+ * files. And it does not tell upper and lower case apart: on Windows and macOS two spellings
+ * name one file, and a guard that can be passed by changing a capital letter is no guard. Too
+ * wide is the safe side there.
+ */
+function matcher(pattern: string, names: 'a branch' | 'a file'): RegExp {
+  const body = pattern
+    .split('*')
+    .map((literal) => literal.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return names === 'a branch' ? new RegExp(`^${body}$`) : new RegExp(`^${body}(?:/.*)?$`, 'i');
 }
+
+// --- branches ---
+
+/** The first tier whose pattern matches the branch, or undefined when no tier covers it. */
+export function tierForBranch(policy: Policy, branch: string): Tier | undefined {
+  return policy.tiers.find((tier) => matcher(tier.branch, 'a branch').test(branch));
+}
+
+// --- protected files ---
 
 /** Every pattern of protected files: the policy file first, then what the policy lists. */
 export function protectedPatterns(policy: Pick<Policy, 'protected'>): readonly string[] {
   return [POLICY_FILE_NAME, ...(policy.protected ?? []).filter((pattern) => pattern !== POLICY_FILE_NAME)];
 }
 
-/**
- * True when a file is protected. `path` is counted from the top of the repository, with forward slashes.
- *
- * Upper and lower case are not told apart. On Windows and macOS two spellings name one file,
- * and a guard that can be passed by changing a capital letter is no guard. Too wide is the safe side here.
- */
+/** True when a file is protected. `path` is counted from the top of the repository, with forward slashes. */
 export function isProtectedPath(policy: Pick<Policy, 'protected'>, path: string): boolean {
-  return protectedPatterns(policy).some((pattern) => new RegExp(`^${escapePattern(pattern)}(?:/.*)?$`, 'i').test(path));
-}
-
-/** The first tier whose pattern matches the branch, or undefined when no tier covers it. */
-export function tierForBranch(policy: Policy, branch: string): Tier | undefined {
-  return policy.tiers.find((tier) => patternToRegExp(tier.branch).test(branch));
+  return protectedPatterns(policy).some((pattern) => matcher(pattern, 'a file').test(path));
 }

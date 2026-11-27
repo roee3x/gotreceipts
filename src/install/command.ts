@@ -1,8 +1,7 @@
-import { parseArgs } from 'node:util';
-
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { repoRoot } from '../git.ts';
 import type { Io } from '../main.ts';
+import { readOptions } from '../options.ts';
 import { loadPolicy } from '../policy/load.ts';
 import type { Policy } from '../policy/policy.ts';
 import { installAgentHook, SETTINGS_FILE, uninstallAgentHook } from './claude-code.ts';
@@ -61,38 +60,14 @@ export const DOCTOR_USAGE = [
 
 type Setup = { readonly ok: true; readonly policy: Policy; readonly root: string } | { readonly ok: false; readonly code: ExitCode };
 
-/** Reads the options. These commands take none but --help. Returns an exit code when there is nothing more to do. */
-function readOptions(command: string, usage: string, args: readonly string[], io: Io): ExitCode | undefined {
-  let help: boolean | undefined;
-  try {
-    const parsed = parseArgs({ args: [...args], options: { help: { type: 'boolean', short: 'h' } }, strict: true });
-    help = parsed.values.help;
-  } catch (error) {
-    io.err(`gotreceipts ${command}: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(usage);
-    return EXIT.CANNOT_RUN;
-  }
-  if (help === true) {
-    io.out(usage);
-    return EXIT.PASS;
-  }
-  return undefined;
-}
-
-/** What install and doctor share: read the options, find the repository, read the policy. */
+/** What install and doctor share: read the options, find the repository, read the policy. These commands take no option but --help. */
 function setUp(command: string, usage: string, args: readonly string[], io: Io): Setup {
-  const done = readOptions(command, usage, args, io);
-  if (done !== undefined) return { ok: false, code: done };
+  const start = readOptions({ command, usage }, args, io);
+  if (start.done) return { ok: false, code: start.code };
 
   const loaded = loadPolicy(process.cwd());
-  if (!loaded.ok) {
-    for (const error of loaded.errors) io.err(`gotreceipts ${command}: CANNOT RUN: ${error}`);
-    return { ok: false, code: EXIT.CANNOT_RUN };
-  }
-  if (loaded.root === undefined) {
-    io.err(`gotreceipts ${command}: CANNOT RUN: this folder is not inside a git repository`);
-    return { ok: false, code: EXIT.CANNOT_RUN };
-  }
+  if (!loaded.ok) return { ok: false, code: start.cannotRun(...loaded.errors) };
+  if (loaded.root === undefined) return { ok: false, code: start.cannotRun('this folder is not inside a git repository') };
   return { ok: true, policy: loaded.policy, root: loaded.root };
 }
 
@@ -211,15 +186,12 @@ export async function installCommand(args: readonly string[], io: Io): Promise<E
 }
 
 export async function uninstallCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  const done = readOptions('uninstall', UNINSTALL_USAGE, args, io);
-  if (done !== undefined) return done;
+  const start = readOptions({ command: 'uninstall', usage: UNINSTALL_USAGE }, args, io);
+  if (start.done) return start.code;
 
   // No policy is needed to leave. A repository with a broken policy must still be able to uninstall.
   const root = repoRoot(process.cwd());
-  if (root === undefined) {
-    io.err('gotreceipts uninstall: CANNOT RUN: this folder is not inside a git repository');
-    return EXIT.CANNOT_RUN;
-  }
+  if (root === undefined) return start.cannotRun('this folder is not inside a git repository');
 
   let failed = false;
   io.out('gotreceipts uninstall:');

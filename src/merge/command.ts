@@ -1,14 +1,13 @@
-import { parseArgs } from 'node:util';
-
 import { approvalAdvice, approvalLines, judgeApproval } from '../approval/judge.ts';
+import { shownAge } from '../clock.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { fetchRef, hasCommit, headCommit, mergedTree, remoteBranchTip, remotes, repoRoot, treeOf } from '../git.ts';
+import { branchRef, headCommit, mergedTree, obtainCommit, remoteBranch, remotes, repoRoot, shortId, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
+import { readOptions } from '../options.ts';
 import { policyFor, sourceLines } from '../policy/committed.ts';
 import { tierForBranch } from '../policy/policy.ts';
 import { countOf } from '../travel/receipts.ts';
 import { fetchReceipts, sendReceipts } from '../travel/remote.ts';
-import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
 import {
   MERGE_METHODS,
@@ -66,37 +65,10 @@ export function remoteFor(root: string, pullRequestUrl: string): string | undefi
 }
 
 export async function mergeCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  let options: { method?: string; subject?: string; body?: string; help?: boolean };
-  let positionals: string[];
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: {
-        method: { type: 'string' },
-        subject: { type: 'string' },
-        body: { type: 'string' },
-        help: { type: 'boolean', short: 'h' },
-      },
-      allowPositionals: true,
-      strict: true,
-    });
-    options = parsed.values;
-    positionals = parsed.positionals;
-  } catch (error) {
-    io.err(`gotreceipts merge: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(MERGE_USAGE);
-    return EXIT.CANNOT_RUN;
-  }
+  const start = readOptions({ command: 'merge', usage: MERGE_USAGE, values: ['method', 'subject', 'body'], positionals: true }, args, io);
+  if (start.done) return start.code;
+  const { options, positionals, cannotRun } = start;
 
-  if (options.help === true) {
-    io.out(MERGE_USAGE);
-    return EXIT.PASS;
-  }
-
-  const cannotRun = (reason: string): ExitCode => {
-    io.err(`gotreceipts merge: CANNOT RUN: ${reason}`);
-    return EXIT.CANNOT_RUN;
-  };
   const refused = (summary: string, advice: readonly string[] = []): ExitCode => {
     io.out(`VERDICT: REFUSED (${summary}). Nothing was merged.`);
     for (const line of advice) io.out(line);
@@ -122,7 +94,7 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
   if (!viewed.ok) return cannotRun(`GitHub could not be asked about pull request #${number}: ${viewed.error}`);
   const pullRequest = viewed.value;
   const { baseRefName: base, headRefOid: commit } = pullRequest;
-  const shortCommit = commit.slice(0, 7);
+  const shortCommit = shortId(commit);
 
   io.out(`gotreceipts merge: pull request #${number}, ${pullRequest.headRefName} into ${base}`);
   if (pullRequest.state !== 'OPEN') {
@@ -135,21 +107,17 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
   //    this clone remembers.
   const remote = remoteFor(root, pullRequest.url);
   if (remote === undefined) return cannotRun('this repository has no remote, so the target branch cannot be read');
-  const baseTip = remoteBranchTip(root, remote, base);
-  if (baseTip === undefined) return cannotRun(`the remote "${remote}" could not say where "${base}" is now`);
-  if (!hasCommit(root, baseTip) && !(fetchRef(root, remote, `refs/heads/${base}`) && hasCommit(root, baseTip))) {
-    return cannotRun(`the newest commit of "${base}" could not be downloaded`);
-  }
-  if (!hasCommit(root, commit) && !(fetchRef(root, remote, `refs/pull/${number}/head`) && hasCommit(root, commit))) {
+  const onRemote = remoteBranch(root, remote, base);
+  if (onRemote.kind === 'unknown') return cannotRun(`the remote "${remote}" could not say where "${base}" is now`);
+  if (onRemote.kind === 'not-downloaded') return cannotRun(`the newest commit of "${base}" could not be downloaded`);
+  const baseTip = onRemote.commit;
+  if (!obtainCommit(root, remote, `refs/pull/${number}/head`, commit)) {
     return cannotRun(`commit ${shortCommit} of the pull request could not be downloaded`);
   }
 
   // 3. The policy: the one that is already on the target branch, not the pull request's own copy.
   const picked = policyFor(root, commit, { branch: base, commit: baseTip, shown: `${remote}/${base}` });
-  if (!picked.ok) {
-    for (const error of picked.errors) io.err(`gotreceipts merge: CANNOT RUN: ${error}`);
-    return EXIT.CANNOT_RUN;
-  }
+  if (!picked.ok) return cannotRun(...picked.errors);
   const { policy } = picked;
   const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
   io.out(`  policy: ${policyLine}`);
@@ -254,9 +222,9 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
     io.out(`Look at it: gh pr view ${number}`);
     return EXIT.CANNOT_RUN;
   }
-  if (!hasCommit(root, mergeCommit)) fetchRef(root, remote, `refs/heads/${base}`);
+  obtainCommit(root, remote, branchRef(base), mergeCommit);
   const resultTree = treeOf(root, mergeCommit);
-  const shortMerge = mergeCommit.slice(0, 7);
+  const shortMerge = shortId(mergeCommit);
   if (resultTree === undefined) {
     io.out(`VERDICT: MERGED, NOT COMPARED (commit ${shortMerge} on ${base} could not be downloaded to compare it with what was tested)`);
     return EXIT.CANNOT_RUN;

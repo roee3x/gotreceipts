@@ -1,10 +1,11 @@
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { parseApproval } from '../approval/statement.ts';
+import { isInTheFuture } from '../clock.ts';
+import { gitBytes } from '../git.ts';
 import { parseRecord } from '../record/record.ts';
-import { recordsFolder } from '../record/store.ts';
+import { storeFolder, writeWhole } from '../store.ts';
 
 /**
  * Records and approvals that travel.
@@ -44,8 +45,6 @@ export interface Receipt {
 
 /** The largest file that is accepted from a remote. A record is a few kilobytes. */
 const MAX_BYTES = 1024 * 1024;
-/** Two machines never agree on the time to the second. The same allowance the doors give. */
-const CLOCK_TOLERANCE_MS = 5 * 60 * 1000;
 const RECORD_PATH = /^records\/([A-Za-z0-9][A-Za-z0-9_-]*)\.json$/;
 /** The branch part is a branch name as a file name: letters, digits, and what "encodeURIComponent" leaves or makes. */
 const APPROVAL_PATH = /^approvals\/([A-Za-z0-9._~!*'()%-]+)\.json$/;
@@ -100,13 +99,7 @@ export function sortIntoReceipts(commit: string, files: ReadonlyMap<string, Buff
  * always replaces the older, one such file would stand in the way of every honest one after it.
  */
 export function notFromTheFuture(receipts: readonly Receipt[], now: number): Receipt[] {
-  return receipts.filter((receipt) => receipt.time <= now + CLOCK_TOLERANCE_MS);
-}
-
-/** The folder inside .git that holds the "records" and the "approvals" folders. */
-function storeFolder(root: string): string | undefined {
-  const records = recordsFolder(root);
-  return records === undefined ? undefined : dirname(records);
+  return receipts.filter((receipt) => !isInTheFuture(receipt.time, now));
 }
 
 /** The records and approvals this clone holds for one commit. */
@@ -143,9 +136,7 @@ export function keepReceipts(root: string, commit: string, receipts: readonly Re
         const [kind = '', name = ''] = path.split('/');
         const target = join(store, kind, commit, name);
         mkdirSync(dirname(target), { recursive: true });
-        const temporary = `${target}.${process.pid}.tmp`;
-        writeFileSync(temporary, content);
-        renameSync(temporary, target);
+        writeWhole(target, content);
       }
     }
     return true;
@@ -207,23 +198,10 @@ export function countOf(receipts: readonly Receipt[]): string {
 
 // --- receipts as a git commit ---
 
-interface RawGit {
-  readonly ok: boolean;
-  readonly stdout: Buffer;
-  readonly stderr: string;
-}
-
-/** Runs git with bytes in and bytes out. A record is text, but a signature is checked byte for byte. */
-function gitRaw(args: readonly string[], cwd: string, input?: Buffer, env?: NodeJS.ProcessEnv): RawGit {
-  const result = spawnSync('git', args, { cwd, input, env, maxBuffer: 64 * 1024 * 1024, windowsHide: true });
-  if (result.error !== undefined) return { ok: false, stdout: Buffer.alloc(0), stderr: result.error.message };
-  return { ok: result.status === 0, stdout: result.stdout, stderr: result.stderr.toString('utf8') };
-}
-
 /** The files a receipts commit holds, as path and content. Undefined when git could not read it. */
 export function filesOfCommit(root: string, receiptsCommit: string): Map<string, Buffer> | undefined {
   // Each entry is "<mode> <type> <id> <size>", a tab, the path, and a zero byte.
-  const listed = gitRaw(['ls-tree', '-r', '-l', '-z', receiptsCommit], root);
+  const listed = gitBytes(['ls-tree', '-r', '-l', '-z', receiptsCommit], root);
   if (!listed.ok) return undefined;
   const files = new Map<string, Buffer>();
   for (const entry of listed.stdout.toString('utf8').split('\0')) {
@@ -232,7 +210,7 @@ export function filesOfCommit(root: string, receiptsCommit: string): Map<string,
     // Only plain files, of a sane size, and only under the two known folders. Everything else is not looked at.
     if (mode !== '100644' || type !== 'blob' || id === undefined || Number(size) > MAX_BYTES) continue;
     if (!RECORD_PATH.test(path) && !APPROVAL_PATH.test(path.replace(/\.sig$/, ''))) continue;
-    const content = gitRaw(['cat-file', 'blob', id], root);
+    const content = gitBytes(['cat-file', 'blob', id], root);
     if (content.ok) files.set(path, content.stdout);
   }
   return files;
@@ -247,7 +225,7 @@ export function writeCommit(root: string, commit: string, receipts: readonly Rec
   const folders = new Map<string, string[]>();
   for (const receipt of receipts) {
     for (const [path, content] of receipt.files) {
-      const blob = gitRaw(['hash-object', '-w', '--stdin'], root, content);
+      const blob = gitBytes(['hash-object', '-w', '--stdin'], root, content);
       if (!blob.ok) return undefined;
       const [folder = '', name = ''] = path.split('/');
       folders.set(folder, [...(folders.get(folder) ?? []), `100644 blob ${blob.stdout.toString('utf8').trim()}\t${name}\n`]);
@@ -256,11 +234,11 @@ export function writeCommit(root: string, commit: string, receipts: readonly Rec
 
   const top: string[] = [];
   for (const [folder, lines] of [...folders].sort(([a], [b]) => (a < b ? -1 : 1))) {
-    const tree = gitRaw(['mktree'], root, Buffer.from(lines.sort().join('')));
+    const tree = gitBytes(['mktree'], root, Buffer.from(lines.sort().join('')));
     if (!tree.ok) return undefined;
     top.push(`040000 tree ${tree.stdout.toString('utf8').trim()}\t${folder}\n`);
   }
-  const tree = gitRaw(['mktree'], root, Buffer.from(top.join('')));
+  const tree = gitBytes(['mktree'], root, Buffer.from(top.join('')));
   if (!tree.ok) return undefined;
 
   // The commit is made in the tool's own name, on every machine. It is not anyone's work, and
@@ -273,7 +251,7 @@ export function writeCommit(root: string, commit: string, receipts: readonly Rec
     GIT_COMMITTER_NAME: 'gotreceipts',
     GIT_COMMITTER_EMAIL: 'receipts@gotreceipts.invalid',
   };
-  const made = gitRaw(
+  const made = gitBytes(
     ['commit-tree', tree.stdout.toString('utf8').trim(), ...(parent === undefined ? [] : ['-p', parent]), '-m', `gotreceipts: records and approvals of ${commit}`],
     root,
     undefined,

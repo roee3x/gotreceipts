@@ -1,11 +1,10 @@
+import { hoursSince, isInTheFuture, shownAge } from '../clock.ts';
+import { shortId } from '../git.ts';
 import type { PolicySource } from '../policy/committed.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
 import { checkSignature } from './ssh.ts';
 import { parseApproval } from './statement.ts';
 import { readApprovalFiles } from './store.ts';
-
-/** How far ahead of the clock an approval may be dated before it is distrusted. */
-const CLOCK_TOLERANCE_MS = 5 * 60_000;
 
 export type ApprovalDecision =
   /** The commit may enter the branch without an approval. */
@@ -74,9 +73,9 @@ export function judgeApproval(
   if (approval.commit !== commit) return doesNotCount('it approves another commit');
   if (approval.branch !== branch) return doesNotCount('it approves another branch');
 
-  const age = now - Date.parse(approval.approvedAt);
-  if (age < -CLOCK_TOLERANCE_MS) return doesNotCount('it is dated in the future');
-  const ageHours = age / 3_600_000;
+  const approvedAt = Date.parse(approval.approvedAt);
+  if (isInTheFuture(approvedAt, now)) return doesNotCount('it is dated in the future');
+  const ageHours = hoursSince(approvedAt, now);
   if (ageHours > policy.approval.maxAgeHours) {
     return doesNotCount(`it is older than the ${policy.approval.maxAgeHours} hours an approval counts for`);
   }
@@ -91,7 +90,7 @@ export function approvalLines(decision: ApprovalDecision): string[] {
     case 'not-locked':
       return ['approval: not asked for. The policy lists no signer, so a change to a protected file needs nobody\'s signature'];
     case 'approved':
-      return [needed(decision.reasons), `approved by ${decision.signer}, ${Math.max(0, decision.ageHours).toFixed(1)} hours ago`];
+      return [needed(decision.reasons), `approved by ${decision.signer}, ${shownAge(decision.ageHours)} hours ago`];
     case 'refused':
       return [needed(decision.reasons), decision.detail];
     case 'cannot-check':
@@ -107,6 +106,6 @@ function needed(reasons: readonly string[]): string {
 export function approvalAdvice(commit: string, branch: string): string[] {
   return [
     'An approval is the signature of an owner. They give it in their own terminal:',
-    `  gotreceipts approve ${commit.slice(0, 7)} --for ${branch}`,
+    `  gotreceipts approve ${shortId(commit)} --for ${branch}`,
   ];
 }
