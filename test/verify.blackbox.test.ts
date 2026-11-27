@@ -1,7 +1,7 @@
 // Outside-in tests for "gotreceipts verify".
 
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -45,7 +45,7 @@ test('a commit with no record is refused, and the answer says how to make one', 
   assert.equal(result.status, 1);
   assert.match(result.stdout, new RegExp(`commit ${head(repo).slice(0, 7)} needs level G0`));
   assert.match(result.stdout, /VERDICT: REFUSED \(there is no record for this commit\)/);
-  assert.equal(lastLine(result.stdout), 'To make a record: gotreceipts gate --level G0');
+  assert.equal(lastLine(result.stdout), 'To make a record: gotreceipts gate');
 });
 
 test('after a passing gate, the commit is accepted', (t) => {
@@ -90,7 +90,10 @@ test('the level a commit needs can come from the branch it wants to enter', (t) 
   const forMain = runCli(repo, ['verify', '--for', 'main']);
   assert.equal(forMain.status, 1);
   assert.match(forMain.stdout, /G0 record, passed 0\.0 hours ago: its level is below G1/);
-  assert.equal(lastLine(forMain.stdout), 'To make a record: gotreceipts gate --level G1');
+  // The advice names the branch again, so the gate reads the same policy this answer was given under.
+  assert.equal(lastLine(forMain.stdout), 'To make a record: gotreceipts gate --for main');
+  const byLevel = runCli(repo, ['verify', '--level', 'G1']);
+  assert.equal(lastLine(byLevel.stdout), 'To make a record: gotreceipts gate --level G1');
 
   // A G1 record covers both.
   assert.equal(runCli(repo, ['gate', '--for', 'main']).status, 0);
@@ -98,18 +101,42 @@ test('the level a commit needs can come from the branch it wants to enter', (t) 
   assert.equal(runCli(repo, ['verify', '--level', 'G0']).status, 0);
 });
 
-test('a record made before the policy changed no longer counts', (t) => {
+test('a record made before the policy of the target branch changed no longer counts', (t) => {
+  const repo = tempRepo(t, { policy: POLICY });
+  // The branch "main" exists, and holds the same policy.
+  assert.equal(gitIn(repo, 'branch', 'main').status, 0);
+  assert.equal(runCli(repo, ['gate', '--for', 'main']).status, 0);
+  const before = runCli(repo, ['verify', '--for', 'main']);
+  assert.equal(before.status, 0, before.stdout + before.stderr);
+  assert.match(before.stdout, /policy: the one on main, at commit \w{7}/);
+
+  // Someone else gets a stricter policy into main.
+  const stricter = structuredClone(POLICY);
+  stricter.levels[0]!.checks.push({ name: 'added-later', run: 'node checks/pass.js' });
+  assert.equal(gitIn(repo, 'switch', '--quiet', 'main').status, 0);
+  writeIn(repo, 'gotreceipts.json', `${JSON.stringify(stricter, null, 2)}\n`);
+  assert.equal(gitIn(repo, 'commit', '--quiet', '--all', '-m', 'test: a stricter policy').status, 0);
+  assert.equal(gitIn(repo, 'switch', '--quiet', 'feature/thing').status, 0);
+
+  const result = runCli(repo, ['verify', '--for', 'main']);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /it was made under a different policy than the current one/);
+});
+
+test('only a committed policy counts: the file in the folder is never read', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   runCli(repo, ['gate']);
   assert.equal(runCli(repo, ['verify']).status, 0);
 
+  // Edited in the folder and not committed: the answer does not change.
   const stricter = structuredClone(POLICY);
   stricter.levels[0]!.checks.push({ name: 'added-later', run: 'node checks/pass.js' });
   writeIn(repo, 'gotreceipts.json', `${JSON.stringify(stricter, null, 2)}\n`);
+  assert.equal(runCli(repo, ['verify']).status, 0);
 
-  const result = runCli(repo, ['verify']);
-  assert.equal(result.status, 1);
-  assert.match(result.stdout, /it was made under a different policy than the current one/);
+  // Deleted from the folder: the same.
+  rmSync(join(repo, 'gotreceipts.json'));
+  assert.equal(runCli(repo, ['verify']).status, 0);
 });
 
 test('a record that is too old no longer counts', (t) => {
@@ -221,7 +248,7 @@ test('a question that cannot be answered is "could not run", never a refusal or 
   const noPolicy = tempRepo(t);
   const noPolicyResult = runCli(noPolicy, ['verify']);
   assert.equal(noPolicyResult.status, 2);
-  assert.match(noPolicyResult.stderr, /CANNOT RUN: no policy file at/);
+  assert.match(noPolicyResult.stderr, /CANNOT RUN: commit \w{7} holds no policy file \(gotreceipts\.json\)/);
 
   const noCommit = tempRepo(t, { policy: POLICY, commit: false });
   const noCommitResult = runCli(noCommit, ['verify']);

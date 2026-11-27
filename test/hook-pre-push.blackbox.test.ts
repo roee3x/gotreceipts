@@ -4,10 +4,9 @@
 // The last group lets git itself call it, during a real push to a second repository.
 
 import assert from 'node:assert/strict';
-import { chmodSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { addRemote, cliPath, gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { addRemote, gitIn, installPushHook, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
 
 /** G0 holds one check that can be made to fail from outside. G1 adds a check that always passes. */
 const POLICY = {
@@ -59,6 +58,8 @@ test('after a passing gate, the push is allowed', (t) => {
   const result = hook(repo, pushLine(head(repo), 'feature/thing'));
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /needs level G0: PASS \(G0 record, passed 0\.0 hours ago\)/);
+  // The branch is new on the other side, so there is no policy there to judge it by.
+  assert.match(result.stdout, /policy: the one in this commit, because "feature\/thing" does not exist yet/);
   assert.equal(lastLine(result.stdout), 'VERDICT: PASS (1 pushed commit has a valid record)');
 });
 
@@ -135,11 +136,14 @@ test('a push that changes nothing is allowed', (t) => {
   assert.equal(lastLine(result.stdout), 'VERDICT: PASS (nothing in this push needs a record)');
 });
 
-test('without a policy the hook cannot check, and that blocks the push', (t) => {
+test('without a committed policy the hook cannot check, and that blocks the push', (t) => {
   const repo = tempRepo(t);
+  // A policy file that is only in the folder does not count.
+  writeIn(repo, 'gotreceipts.json', `${JSON.stringify(POLICY)}\n`);
+
   const result = hook(repo, pushLine(head(repo), 'feature/thing'));
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /CANNOT CHECK: no policy file at/);
+  assert.match(result.stderr, /CANNOT CHECK: feature\/thing: commit \w{7} holds no policy file \(gotreceipts\.json\)\. Only a committed policy counts/);
   assert.match(result.stderr, /The push is blocked\. A check that could not run is never treated as a pass\./);
 });
 
@@ -159,13 +163,7 @@ test('an unknown hook name, or none, is "could not run"', (t) => {
 
 // --- git itself calls the hook ---
 
-/** Puts a pre-push hook in the repository that calls the built tool, like an installed hook would. */
-function installHook(repo: string): void {
-  const node = process.execPath.replace(/\\/g, '/');
-  const cli = cliPath.replace(/\\/g, '/');
-  const path = writeIn(repo, '.git/hooks/pre-push', `#!/bin/sh\nexec "${node}" "${cli}" hook pre-push "$@"\n`);
-  chmodSync(path, 0o755);
-}
+const installHook = installPushHook;
 
 function remoteHas(remote: string, branch: string): boolean {
   return gitIn(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).status === 0;

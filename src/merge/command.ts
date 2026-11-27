@@ -1,9 +1,9 @@
 import { parseArgs } from 'node:util';
 
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { fetchRef, hasCommit, headCommit, mergedTree, remoteBranchTip, remotes, treeOf } from '../git.ts';
+import { fetchRef, hasCommit, headCommit, mergedTree, remoteBranchTip, remotes, repoRoot, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
-import { loadPolicy } from '../policy/load.ts';
+import { policyFor, sourceLines } from '../policy/committed.ts';
 import { tierForBranch } from '../policy/policy.ts';
 import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
@@ -28,6 +28,9 @@ export const MERGE_USAGE = [
   '     holds changes the commit does not contain, it would not, and the merge is refused.',
   'Then it asks GitHub to merge that exact commit and no other.',
   'After the merge it compares what GitHub made with what was tested.',
+  '',
+  'The level and the policy are the ones that are already on the target branch, read from the',
+  'remote. What the pull request did to its own copy of gotreceipts.json does not count.',
   '',
   'Options:',
   '  --method <how>    merge (the default), squash or rebase',
@@ -103,12 +106,7 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
     return cannotRun(`there is no merge method "${method}" (methods: ${MERGE_METHODS.join(', ')})`);
   }
 
-  const loaded = loadPolicy(process.cwd());
-  if (!loaded.ok) {
-    for (const error of loaded.errors) io.err(`gotreceipts merge: CANNOT RUN: ${error}`);
-    return EXIT.CANNOT_RUN;
-  }
-  const { policy, root } = loaded;
+  const root = repoRoot(process.cwd());
   if (root === undefined) return cannotRun('this folder is not inside a git repository');
 
   // 1. The pull request, as GitHub has it now.
@@ -124,10 +122,34 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
   }
   if (pullRequest.isDraft) return refused(`pull request #${number} is a draft`);
 
-  // 2. The record. 3. The merged result.
+  // 2. The target branch and the commit, both as the remote has them now, so that the policy
+  //    can be read from the target. It is asked from the remote itself, not taken from what
+  //    this clone remembers.
+  const remote = remoteFor(root, pullRequest.url);
+  if (remote === undefined) return cannotRun('this repository has no remote, so the target branch cannot be read');
+  const baseTip = remoteBranchTip(root, remote, base);
+  if (baseTip === undefined) return cannotRun(`the remote "${remote}" could not say where "${base}" is now`);
+  if (!hasCommit(root, baseTip) && !(fetchRef(root, remote, `refs/heads/${base}`) && hasCommit(root, baseTip))) {
+    return cannotRun(`the newest commit of "${base}" could not be downloaded`);
+  }
+  if (!hasCommit(root, commit) && !(fetchRef(root, remote, `refs/pull/${number}/head`) && hasCommit(root, commit))) {
+    return cannotRun(`commit ${shortCommit} of the pull request could not be downloaded`);
+  }
+
+  // 3. The policy: the one that is already on the target branch, not the pull request's own copy.
+  const picked = policyFor(root, commit, { branch: base, commit: baseTip, shown: `${remote}/${base}` });
+  if (!picked.ok) {
+    for (const error of picked.errors) io.err(`gotreceipts merge: CANNOT RUN: ${error}`);
+    return EXIT.CANNOT_RUN;
+  }
+  const { policy } = picked;
+  const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
+  io.out(`  policy: ${policyLine}`);
+  for (const note of policyNotes) io.out(`  ${note}`);
+
+  // 4. The record. 5. The merged result.
   const tier = tierForBranch(policy, base);
   let testedTree: string | undefined;
-  let remote: string | undefined;
 
   if (tier === undefined) {
     io.out(`  the policy sets no level for "${base}", so no record is needed`);
@@ -143,17 +165,6 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
       ]);
     }
     io.out(`  ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago, under the current policy`);
-
-    remote = remoteFor(root, pullRequest.url);
-    if (remote === undefined) return cannotRun('this repository has no remote, so the target branch cannot be read');
-    const baseTip = remoteBranchTip(root, remote, base);
-    if (baseTip === undefined) return cannotRun(`the remote "${remote}" could not say where "${base}" is now`);
-    if (!hasCommit(root, baseTip) && !(fetchRef(root, remote, `refs/heads/${base}`) && hasCommit(root, baseTip))) {
-      return cannotRun(`the newest commit of "${base}" could not be downloaded`);
-    }
-    if (!hasCommit(root, commit) && !(fetchRef(root, remote, `refs/pull/${number}/head`) && hasCommit(root, commit))) {
-      return cannotRun(`commit ${shortCommit} of the pull request could not be downloaded`);
-    }
 
     const merged = mergedTree(root, baseTip, commit);
     if (merged.kind === 'error') return cannotRun(`git could not work out the merged result: ${merged.message}`);
@@ -173,7 +184,7 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
     io.out(`  the merged result holds exactly the files of commit ${shortCommit}`);
   }
 
-  // 4. The merge, pinned to the commit that was checked.
+  // 6. The merge, pinned to the commit that was checked.
   io.out(`  asking GitHub to merge commit ${shortCommit}, and no other`);
   const request = mergePullRequest(root, {
     number,
@@ -187,12 +198,12 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
     if (line.trim() !== '') io.out(`  gh: ${line.trim()}`);
   }
 
-  if (testedTree === undefined || remote === undefined) {
+  if (testedTree === undefined) {
     io.out(`VERDICT: MERGED (pull request #${number}, commit ${shortCommit} into ${base}, a branch with no level)`);
     return EXIT.PASS;
   }
 
-  // 5. What GitHub made, compared with what was tested. The target branch can move in the
+  // 7. What GitHub made, compared with what was tested. The target branch can move in the
   //    moment between the check and the merge. That cannot be prevented from here, so it is detected.
   const after = mergeCommitOf(root, number);
   const mergeCommit = after.ok && after.value.state === 'MERGED' ? after.value.commit : undefined;

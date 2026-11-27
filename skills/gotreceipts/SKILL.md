@@ -34,10 +34,11 @@ What the common answers mean:
 - **"a newer run failed after it"**: a later run on the same commit failed. A check that passes only sometimes is a failing check. Find out why it failed. Do not run it again and again until it passes.
 - **"the merged result would not be what was tested"**: the target branch holds changes that your commit does not contain. Merge the target branch into yours, run the gate on the new commit, push, and merge again.
 - **"there are uncommitted changes"**: the gate could not run. Commit or stash, then run it.
+- **"this commit changes the policy file"**: the commit holds another policy than the branch it wants to enter. It is judged by the policy that is already on that branch, so the change does not help it pass. Tell the user that the commit changes the policy.
 
 ## Rules
 
-- **Fix the code, never the gate.** Do not edit `gotreceipts.json`, the command of a check, the number of tests a check expects, a hook or a CI workflow to make a failure go away. If you believe the gate itself is wrong, stop and tell the user why.
+- **Fix the code, never the gate.** Do not edit `gotreceipts.json`, the command of a check, the number of tests a check expects, a hook or a CI workflow to make a failure go away. If you believe the gate itself is wrong, stop and tell the user why. Editing the policy on your branch would not help anyway: a commit is judged by the policy that is already on the branch it wants to enter.
 - **Never go around it.** No `git push --no-verify`. No `gh pr merge`, and no merge through the API. No writing or editing files under `.git/gotreceipts`. No uninstalling the hooks.
 - **Never report a pass you did not see.** Quote the `VERDICT:` line. If a command could not run, say that it could not run.
 - **Do not delete or weaken a test to get to green.** A gate that passes because a check was removed has not passed.
@@ -50,5 +51,5 @@ What the common answers mean:
 | `gotreceipts gate` | Runs the checks on the current commit and writes the record |
 | `gotreceipts verify [commit] --for <branch>` | Says whether a commit has a valid record. Runs nothing |
 | `gotreceipts merge <number>` | Merges a pull request, only when its commit has its record |
-| `gotreceipts policy` | Shows the levels, their checks, and which branch needs which level |
+| `gotreceipts policy --for <branch>` | Shows the policy a commit must pass to enter that branch: the levels, their checks, and which branch needs which level |
 | `gotreceipts doctor` | Shows what is enforced in this clone, and what is not |

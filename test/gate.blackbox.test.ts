@@ -161,7 +161,7 @@ test('no policy, a broken policy, or no commit is "could not run"', (t) => {
   const noPolicy = tempRepo(t);
   const noPolicyResult = runCli(noPolicy, ['gate']);
   assert.equal(noPolicyResult.status, 2);
-  assert.match(noPolicyResult.stderr, /CANNOT RUN: no policy file at/);
+  assert.match(noPolicyResult.stderr, /CANNOT RUN: commit \w{7} holds no policy file \(gotreceipts\.json\)\. Only a committed policy counts/);
 
   const broken = tempRepo(t, { policy: { schema: 1, levels: [], tiers: [] } });
   const brokenResult = runCli(broken, ['gate']);
