@@ -5,6 +5,7 @@ import { hookCommand } from './hook/command.ts';
 import { doctorCommand, installCommand, uninstallCommand } from './install/command.ts';
 import { mergeCommand } from './merge/command.ts';
 import { policyCommand } from './policy/command.ts';
+import { fetchCommand, sendCommand } from './travel/command.ts';
 import { readVersion } from './version.ts';
 import { verifyCommand } from './verify/command.ts';
 import { wordsCommand } from './words/command.ts';
@@ -21,11 +22,13 @@ export const USAGE = [
   'Commands:',
   '  approve          Sign an approval of one commit into one branch. For a person, not an agent',
   '  doctor           Report what is enforced in this clone, and what is not',
+  '  fetch            Get the records and approvals the remote holds for a commit',
   '  gate             Run the checks of a gate level on the current commit',
   '  hook             The entry points git and the coding agent call. Not run by hand',
   '  install          Put the hooks of this tool into this clone',
   '  merge            Merge a pull request on GitHub, only when its commit has its record',
   '  policy           Check gotreceipts.json and show what the gate will do',
+  '  send             Send the records and approvals of a commit to the remote',
   '  uninstall        Remove the hooks again',
   '  verify           Say whether a commit has a record that satisfies a gate level',
   '  words            Fail if a file, a file path or a commit message contains a private word',
@@ -103,6 +106,14 @@ export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
 
   if (command === 'approve') {
     return approveCommand(rest, io);
+  }
+
+  if (command === 'send') {
+    return sendCommand(rest, io);
+  }
+
+  if (command === 'fetch') {
+    return fetchCommand(rest, io);
   }
 
   io.err(`gotreceipts: unknown command "${command}".`);

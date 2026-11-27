@@ -69,6 +69,11 @@ function describe(io: Io, policy: Policy): void {
   io.out('');
 
   io.out(`A record counts for ${policy.record.maxAgeHours} hours.`);
+  io.out(
+    policy.travel === true
+      ? 'Records and approvals travel: "approve" and "merge" send them to the remote, and "merge" asks the remote for them.'
+      : 'Records and approvals stay in this clone, unless someone runs "gotreceipts send".',
+  );
 }
 
 export async function policyCommand(args: readonly string[], io: Io): Promise<ExitCode> {

@@ -73,7 +73,7 @@ export function parsePolicy(text: string): PolicyResult {
   if (!isObject(raw)) {
     return { ok: false, errors: ['the policy must be a JSON object'] };
   }
-  noUnknownKeys(raw, '', ['schema', 'levels', 'tiers', 'record', 'protected', 'approval']);
+  noUnknownKeys(raw, '', ['schema', 'levels', 'tiers', 'record', 'protected', 'approval', 'travel']);
 
   if (raw['schema'] !== 1) {
     fail('schema', 'must be 1');
@@ -388,6 +388,10 @@ export function parsePolicy(text: string): PolicyResult {
     }
   }
 
+  // --- travel ---
+  const rawTravel = raw['travel'];
+  if (rawTravel !== undefined && typeof rawTravel !== 'boolean') fail('travel', 'must be true or false');
+
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
@@ -399,6 +403,8 @@ export function parsePolicy(text: string): PolicyResult {
       // An empty list is the same policy as no list, so it is left out and the policy id stays the same.
       ...(protectedFiles.length > 0 ? { protected: protectedFiles } : {}),
       ...(signers.length > 0 ? { approval: { signers, maxAgeHours: approvalHours } } : {}),
+      // "false" is the same policy as not writing it.
+      ...(rawTravel === true ? { travel: true as const } : {}),
     },
   };
 }

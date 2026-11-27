@@ -11,6 +11,8 @@ import { remoteFor } from '../merge/command.ts';
 import { viewPullRequest } from '../merge/github.ts';
 import { knownTarget, policyFor, sourceLines, type Target } from '../policy/committed.ts';
 import { isProtectedPath, tierForBranch } from '../policy/policy.ts';
+import { countOf } from '../travel/receipts.ts';
+import { pickRemote, sendReceipts, type Sent } from '../travel/remote.ts';
 import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
 import { readVersion } from '../version.ts';
@@ -52,6 +54,9 @@ export const APPROVE_USAGE = [
   'An approval counts only when the public half of the key is listed in the policy that is',
   'already on the target branch (approval.signers in gotreceipts.json), for that one commit',
   'and that one branch, and for as many hours as that policy says.',
+  '',
+  'The approval is kept in this clone. When that policy says "travel": true, it is also sent',
+  'to the remote, so that another clone and CI can check it. Else "gotreceipts send" does that.',
   '',
   'To make a key, once:   ssh-keygen -t ed25519 -f ~/.ssh/gotreceipts_approval',
   'Give it a passphrase. A key without one can be used by anything that runs on your machine.',
@@ -125,6 +130,8 @@ export async function approveCommand(args: readonly string[], io: Io): Promise<E
   let commit: string;
   let branch: string;
   let target: Target;
+  /** The remote the pull request lives on, when the approval was asked for by its number. */
+  let remoteOfPullRequest: string | undefined;
 
   if (options.pr !== undefined) {
     const wanted = options.pr.replace(/^#/, '');
@@ -151,6 +158,7 @@ export async function approveCommand(args: readonly string[], io: Io): Promise<E
       return cannotRun(`commit ${commit.slice(0, 7)} of the pull request could not be downloaded`);
     }
     target = { branch, commit: tip, shown: `${remote}/${branch}` };
+    remoteOfPullRequest = remote;
   } else {
     if (options.for === undefined) return cannotRun('say which branch the commit is approved into: --for <branch>, or name a pull request with --pr');
     const wanted = positionals[0] ?? 'HEAD';
@@ -252,7 +260,31 @@ export async function approveCommand(args: readonly string[], io: Io): Promise<E
     io.out(`  signed by ${check.signer}`);
     io.out(`  kept as ${approvalLabel(commit, branch)}`);
     io.out(`  it counts for ${policy.approval.maxAgeHours} hours, for this commit and this branch only`);
+
+    // 7. When the policy says records and approvals travel, it goes to the remote now, so that
+    //    another clone and CI can see it. The approval stands either way: it is signed and kept.
+    let notSent: string | undefined;
+    if (policy.travel === true) {
+      const remote = pickRemote(root, remoteOfPullRequest);
+      const sent: Sent = remote.ok ? sendReceipts(root, remote.name, commit, Date.now()) : { kind: 'error', reason: remote.reason };
+      if (sent.kind === 'error') {
+        notSent = sent.reason;
+        io.out(`  NOT SENT to the remote: ${sent.reason}`);
+      } else if (remote.ok) {
+        io.out(
+          sent.kind === 'sent'
+            ? `  sent to ${remote.name}: ${countOf(sent.sent)}`
+            : `  ${remote.name} already holds it`,
+        );
+      }
+    } else {
+      io.out(`  it stays in this clone. To let another clone or CI see it: gotreceipts send ${shortCommit}`);
+    }
+
     io.out(`VERDICT: APPROVED (commit ${shortCommit} into "${branch}", by ${check.signer})`);
+    if (notSent !== undefined) {
+      io.out(`It is signed and kept, and other clones and CI cannot see it yet. Send it: gotreceipts send ${shortCommit}`);
+    }
     return EXIT.PASS;
   } finally {
     rmSync(folder, { recursive: true, force: true });

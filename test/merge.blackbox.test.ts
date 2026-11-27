@@ -5,7 +5,8 @@
 // without a valid record, GitHub is never asked to merge.
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import { test } from 'node:test';
@@ -441,4 +442,100 @@ test('"approve --pr" cannot run for a pull request that is closed, or that GitHu
   const unknown = runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n');
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /CANNOT RUN: GitHub could not be asked about pull request #7/);
+});
+
+// --- records and approvals that travel ---
+
+/** The approval policy, and the word that makes records and approvals travel. */
+function travelPolicy(owner: TestKey): unknown {
+  return { ...(approvalPolicy(owner) as Record<string, unknown>), travel: true };
+}
+
+function receiptsOnRemote(s: Scene): string {
+  return gitIn(s.remote, 'rev-parse', '--verify', '--quiet', `refs/gotreceipts/${s.head}`).stdout.trim();
+}
+
+test('with "travel", what opened the door is on the remote before the merge', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, travelPolicy(owner));
+  const short = s.head.slice(0, 7);
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+
+  // Without an approval the door stays shut, and nothing is sent for a merge that did not happen.
+  const refused = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  assert.equal(receiptsOnRemote(s), '');
+
+  // "approve" sends as it signs. The name is then taken off the remote again, as if the
+  // approval had been signed while the remote could not be reached: the merge must send it.
+  const approved = runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n');
+  assert.equal(approved.status, 0, approved.stdout + approved.stderr);
+  assert.match(approved.stdout, /\n {2}sent to origin: 1 record and 1 approval\n/);
+  assert.equal(gitIn(s.repo, 'push', '--quiet', 'origin', `:refs/gotreceipts/${s.head}`).status, 0);
+  assert.equal(receiptsOnRemote(s), '');
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /\n {2}sent to origin: 1 record and 1 approval\n {2}asking GitHub to merge commit/);
+  assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${short} into main)`);
+  assert.notEqual(receiptsOnRemote(s), '');
+  assert.deepEqual(
+    gitIn(s.remote, 'ls-tree', '-r', '--name-only', `refs/gotreceipts/${s.head}`).stdout.trim().split('\n'),
+    ['approvals/main.json', 'approvals/main.json.sig', 'records/G1.json'],
+  );
+});
+
+test('with "travel", another clone merges with the record and the approval it gets from the remote', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, travelPolicy(owner));
+  const short = s.head.slice(0, 7);
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+  assert.equal(runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n').status, 0);
+
+  const other = mkdtempSync(join(tmpdir(), 'gotreceipts-clone-'));
+  t.after(() => rmSync(other, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  assert.equal(gitIn(tmpdir(), 'clone', '--quiet', '--branch', 'main', s.remote, other).status, 0);
+
+  const result = runCli(other, ['merge', '7'], s.env);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /\n {2}fetched from origin: 1 record and 1 approval\n/);
+  assert.match(result.stdout, /G1 record, passed 0\.0 hours ago, under the current policy/);
+  assert.match(result.stdout, /approved by owner, 0\.0 hours ago/);
+  assert.match(result.stdout, /\n {2}origin already holds the records and approvals of this commit\n/);
+  assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${short} into main)`);
+});
+
+test('without "travel", the merge asks the remote for nothing and sends nothing', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, approvalPolicy(owner));
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+  assert.equal(runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n').status, 0);
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /sent to|fetched from|already holds/);
+  assert.equal(receiptsOnRemote(s), '');
+});
+
+test('with "travel", nothing is merged when the record and the approval cannot be sent', (t) => {
+  const owner = testKey(t);
+  const s = scene(t, 'main', true, travelPolicy(owner));
+  // A server that takes branches, and refuses the name the records are kept under.
+  const hook = writeIn(s.remote, 'hooks/update', '#!/bin/sh\ncase "$1" in\n  refs/gotreceipts/*) echo "that name is not allowed here" >&2; exit 1 ;;\nesac\nexit 0\n');
+  chmodSync(hook, 0o755);
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+
+  const approved = runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n');
+  assert.equal(approved.status, 0, approved.stdout + approved.stderr);
+  assert.match(approved.stdout, /\n {2}NOT SENT to the remote: /);
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stdout, /approved by owner, 0\.0 hours ago/);
+  assert.match(
+    result.stderr,
+    new RegExp(`CANNOT RUN: the records and approvals of commit ${s.head.slice(0, 7)} could not be sent to "origin": .*\\. Nothing was merged`),
+  );
+  assert.deepEqual(s.mergeRequests(), []);
+  assert.equal(receiptsOnRemote(s), '');
 });
