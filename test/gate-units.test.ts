@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { chooseLevel } from '../src/gate/command.ts';
 import { unmetExpectation } from '../src/gate/run-checks.ts';
+import { chooseLevel } from '../src/policy/level.ts';
 import { parsePolicy } from '../src/policy/parse.ts';
 import type { Check, Expect, Policy } from '../src/policy/policy.ts';
 

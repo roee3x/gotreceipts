@@ -1,22 +1,13 @@
-import { approvalAdvice, approvalLines, judgeApproval } from '../approval/judge.ts';
-import { shownAge } from '../clock.ts';
+import { proofOf, rulesFor, type Rules } from '../door/judge.ts';
+import { approvalAdvice, approvalLines, approvalNotChecked, gateAdvice, policyLines, recordButNoApproval, recordLines } from '../door/report.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { branchRef, headCommit, mergedTree, obtainCommit, remoteBranch, remotes, repoRoot, shortId, treeOf } from '../git.ts';
+import { branchRef, headCommit, mergedTree, obtainCommit, repoRoot, shortId, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
 import { readOptions } from '../options.ts';
-import { policyFor, sourceLines } from '../policy/committed.ts';
-import { tierForBranch } from '../policy/policy.ts';
 import { countOf } from '../travel/receipts.ts';
 import { fetchReceipts, sendReceipts } from '../travel/remote.ts';
-import { judgeCommit } from '../verify/judge.ts';
-import {
-  MERGE_METHODS,
-  mergeCommitOf,
-  mergePullRequest,
-  repositoryOf,
-  viewPullRequest,
-  type MergeMethod,
-} from './github.ts';
+import { MERGE_METHODS, mergeCommitOf, mergePullRequest, type MergeMethod, type PullRequest } from './github.ts';
+import { pullRequestNow, pullRequestNumber, targetOf, whyNotOpen } from './target.ts';
 
 export const MERGE_USAGE = [
   'Usage: gotreceipts merge <pull request number> [options]',
@@ -50,171 +41,112 @@ export const MERGE_USAGE = [
   'Exit codes: 0 = merged as tested, 1 = refused, or merged but not as tested, 2 = the command could not run.',
 ].join('\n');
 
-/** The remote that holds the pull request's repository: the one whose address names it, else "origin". */
-export function remoteFor(root: string, pullRequestUrl: string): string | undefined {
-  const all = remotes(root);
-  const repository = repositoryOf(pullRequestUrl)?.toLowerCase();
-  if (repository !== undefined) {
-    const named = all.find((remote) => {
-      const address = remote.url.toLowerCase().replace(/\.git$/, '').replace(/\/$/, '');
-      return address.endsWith(`/${repository}`) || address.endsWith(`:${repository}`);
-    });
-    if (named !== undefined) return named.name;
-  }
-  return (all.find((remote) => remote.name === 'origin') ?? all[0])?.name;
+function isMergeMethod(text: string): text is MergeMethod {
+  return (MERGE_METHODS as readonly string[]).includes(text);
 }
 
-export async function mergeCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  const start = readOptions({ command: 'merge', usage: MERGE_USAGE, values: ['method', 'subject', 'body'], positionals: true }, args, io);
-  if (start.done) return start.code;
-  const { options, positionals, cannotRun } = start;
+/** Prints one line of the report, moved in under its headline. */
+type Say = (line: string) => void;
 
-  const refused = (summary: string, advice: readonly string[] = []): ExitCode => {
-    io.out(`VERDICT: REFUSED (${summary}). Nothing was merged.`);
-    for (const line of advice) io.out(line);
-    return EXIT.REFUSED;
-  };
+/** A commit that a pull request would merge into its target branch. */
+interface Entering {
+  readonly commit: string;
+  /** The target branch, and the commit the remote has it at now. */
+  readonly base: string;
+  readonly baseTip: string;
+  /** The level the policy asks of the target branch. */
+  readonly level: string;
+}
 
-  const wanted = positionals[0]?.replace(/^#/, '');
-  if (positionals.length !== 1 || wanted === undefined || !/^[1-9]\d*$/.test(wanted)) {
-    return cannotRun('give the number of one pull request, for example: gotreceipts merge 12');
-  }
-  const number = Number(wanted);
+type Before =
+  /** Everything holds. `testedTree` is the files of the commit, which the merged result must hold too. */
+  | { readonly kind: 'go'; readonly testedTree: string }
+  | { readonly kind: 'refused'; readonly summary: string; readonly advice: readonly string[] }
+  | { readonly kind: 'cannot-run'; readonly reason: string };
 
-  const method = options.method ?? 'merge';
-  if (!(MERGE_METHODS as readonly string[]).includes(method)) {
-    return cannotRun(`there is no merge method "${method}" (methods: ${MERGE_METHODS.join(', ')})`);
-  }
-
-  const root = repoRoot(process.cwd());
-  if (root === undefined) return cannotRun('this folder is not inside a git repository');
-
-  // 1. The pull request, as GitHub has it now.
-  const viewed = viewPullRequest(root, number);
-  if (!viewed.ok) return cannotRun(`GitHub could not be asked about pull request #${number}: ${viewed.error}`);
-  const pullRequest = viewed.value;
-  const { baseRefName: base, headRefOid: commit } = pullRequest;
+/**
+ * What is checked before a merge into a branch with a level, in this order: the record, the
+ * merged result, the approval. The first one that does not hold ends it.
+ *
+ * The record and the approval are the answer of the one question. The merged result is the
+ * merge command's own check, and it stands between the two: a record is a statement about the
+ * files of one commit, so it only covers a merge that produces exactly those files.
+ */
+function checkBefore(root: string, rules: Rules, entering: Entering, now: number, say: Say): Before {
+  const { commit, base, baseTip, level } = entering;
   const shortCommit = shortId(commit);
+  const refused = (summary: string, ...advice: readonly string[]): Before => ({ kind: 'refused', summary, advice });
+  const cannotRun = (reason: string): Before => ({ kind: 'cannot-run', reason });
 
-  io.out(`gotreceipts merge: pull request #${number}, ${pullRequest.headRefName} into ${base}`);
-  if (pullRequest.state !== 'OPEN') {
-    return refused(`pull request #${number} is not open: GitHub shows it as ${pullRequest.state.toLowerCase()}`);
+  say(`commit ${shortCommit} needs level ${level}`);
+  const proof = proofOf(root, rules, { commit, level, branch: base, now });
+
+  for (const line of recordLines(proof)) say(line);
+  if (!proof.record.ok) return refused(proof.record.summary, `To make a record: ${gateAdvice(base, commit, headCommit(root))}`);
+
+  const merged = mergedTree(root, baseTip, commit);
+  if (merged.kind === 'error') return cannotRun(`git could not work out the merged result: ${merged.message}`);
+  if (merged.kind === 'conflict') {
+    return refused(
+      `commit ${shortCommit} conflicts with "${base}"`,
+      `Merge ${base} into the branch, settle the conflicts, run the gate on the new commit, and merge again.`,
+    );
   }
-  if (pullRequest.isDraft) return refused(`pull request #${number} is a draft`);
-
-  // 2. The target branch and the commit, both as the remote has them now, so that the policy
-  //    can be read from the target. It is asked from the remote itself, not taken from what
-  //    this clone remembers.
-  const remote = remoteFor(root, pullRequest.url);
-  if (remote === undefined) return cannotRun('this repository has no remote, so the target branch cannot be read');
-  const onRemote = remoteBranch(root, remote, base);
-  if (onRemote.kind === 'unknown') return cannotRun(`the remote "${remote}" could not say where "${base}" is now`);
-  if (onRemote.kind === 'not-downloaded') return cannotRun(`the newest commit of "${base}" could not be downloaded`);
-  const baseTip = onRemote.commit;
-  if (!obtainCommit(root, remote, `refs/pull/${number}/head`, commit)) {
-    return cannotRun(`commit ${shortCommit} of the pull request could not be downloaded`);
+  const testedTree = treeOf(root, commit);
+  if (testedTree === undefined) return cannotRun(`git could not read the files of commit ${shortCommit}`);
+  if (merged.tree !== testedTree) {
+    return refused(
+      'the merged result would not be what was tested',
+      `"${base}" holds changes that commit ${shortCommit} does not contain, so the merge would produce files no gate has seen.`,
+      `Merge ${base} into the branch, run the gate on the new commit, and merge again.`,
+    );
   }
+  say(`the merged result holds exactly the files of commit ${shortCommit}`);
 
-  // 3. The policy: the one that is already on the target branch, not the pull request's own copy.
-  const picked = policyFor(root, commit, { branch: base, commit: baseTip, shown: `${remote}/${base}` });
-  if (!picked.ok) return cannotRun(...picked.errors);
-  const { policy } = picked;
-  const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
-  io.out(`  policy: ${policyLine}`);
-  for (const note of policyNotes) io.out(`  ${note}`);
+  const { approval } = proof;
+  for (const line of approvalLines(approval)) say(line);
+  if (approval.kind === 'cannot-check') return cannotRun(approvalNotChecked(approval.reason));
+  if (approval.kind === 'refused') return refused(recordButNoApproval(commit, base), ...approvalAdvice({ commit, branch: base }));
 
-  // 3b. When the policy says records and approvals travel, the remote is asked for the ones of
-  //     this commit: the record may have been made in another clone, and the approval signed
-  //     on another machine. What arrives is judged below like anything this clone made itself.
-  if (policy.travel === true) {
-    const got = fetchReceipts(root, remote, commit, Date.now());
-    if (got.kind === 'error') {
-      io.out(`  ${remote} could not be asked for records and approvals of this commit: ${got.reason}`);
-    } else if (got.kind === 'got' && got.gained.length > 0) {
-      io.out(`  fetched from ${remote}: ${countOf(got.gained)}`);
-    }
+  return { kind: 'go', testedTree };
+}
+
+/**
+ * Asks the remote for records and approvals of the commit. The record may have been made in
+ * another clone, and the approval signed on another machine. What arrives is judged like
+ * anything this clone made itself.
+ */
+function fetchFirst(root: string, remote: string, commit: string, now: number, say: Say): void {
+  const got = fetchReceipts(root, remote, commit, now);
+  if (got.kind === 'error') say(`${remote} could not be asked for records and approvals of this commit: ${got.reason}`);
+  if (got.kind === 'got' && got.gained.length > 0) say(`fetched from ${remote}: ${countOf(got.gained)}`);
+}
+
+/**
+ * Sends the record and the approval that opened this door to the remote, before the merge, so
+ * that the check on the remote's side finds them. Sending is not a check. When it fails, the
+ * merge still goes on and the line says how to send them: this door was opened by what this
+ * clone holds, and the far side will notice what is missing.
+ */
+function sendFirst(root: string, remote: string, commit: string, now: number, say: Say): void {
+  const sent = sendReceipts(root, remote, commit, now);
+  if (sent.kind === 'error') {
+    say(`NOT SENT to ${remote}: ${sent.reason}`);
+    say(`an audit on the remote will not find them. Send them: gotreceipts send ${shortId(commit)}`);
   }
+  if (sent.kind === 'sent') say(`sent to ${remote}: ${countOf(sent.sent)}`);
+  if (sent.kind === 'already') say(`${remote} already holds the records and approvals of this commit`);
+}
 
-  // 4. The record. 5. The merged result.
-  const tier = tierForBranch(policy, base);
-  let testedTree: string | undefined;
+/**
+ * Compares what GitHub made with what was tested, and gives the verdict.
+ *
+ * The target branch can move in the moment between the check and the merge. That cannot be
+ * prevented from here, so it is detected.
+ */
+function compareAfter(root: string, remote: string, pullRequest: PullRequest, testedTree: string, io: Io): ExitCode {
+  const { number, baseRefName: base, headRefOid: commit } = pullRequest;
 
-  if (tier === undefined) {
-    io.out(`  the policy sets no level for "${base}", so no record is needed`);
-  } else {
-    io.out(`  commit ${shortCommit} needs level ${tier.level}`);
-    const { decision, unreadable } = judgeCommit(root, policy, commit, tier.level, Date.now());
-    for (const file of unreadable) io.out(`  ignored, not a valid record: ${file}`);
-    if (!decision.ok) {
-      for (const detail of decision.details) io.out(`  ${detail}`);
-      const command = `gotreceipts gate --for ${base}`;
-      return refused(decision.summary, [
-        `To make a record: ${command}${commit === headCommit(root) ? '' : `   (with commit ${shortCommit} checked out)`}`,
-      ]);
-    }
-    io.out(`  ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago, under the current policy`);
-
-    const merged = mergedTree(root, baseTip, commit);
-    if (merged.kind === 'error') return cannotRun(`git could not work out the merged result: ${merged.message}`);
-    if (merged.kind === 'conflict') {
-      return refused(`commit ${shortCommit} conflicts with "${base}"`, [
-        `Merge ${base} into the branch, settle the conflicts, run the gate on the new commit, and merge again.`,
-      ]);
-    }
-    testedTree = treeOf(root, commit);
-    if (testedTree === undefined) return cannotRun(`git could not read the files of commit ${shortCommit}`);
-    if (merged.tree !== testedTree) {
-      return refused('the merged result would not be what was tested', [
-        `"${base}" holds changes that commit ${shortCommit} does not contain, so the merge would produce files no gate has seen.`,
-        `Merge ${base} into the branch, run the gate on the new commit, and merge again.`,
-      ]);
-    }
-    io.out(`  the merged result holds exactly the files of commit ${shortCommit}`);
-
-    // 5b. The approval, when the target branch or a protected file asks for one.
-    const approval = judgeApproval(root, policy, picked.source, commit, base, Date.now());
-    for (const line of approvalLines(approval)) io.out(`  ${line}`);
-    if (approval.kind === 'cannot-check') return cannotRun(`the approval could not be checked: ${approval.reason}`);
-    if (approval.kind === 'refused') {
-      return refused(`commit ${shortCommit} has its record, and no valid approval for "${base}"`, approvalAdvice(commit, base));
-    }
-  }
-
-  // 5c. When they travel, the record and the approval that opened this door go to the remote
-  //     before the merge, so that the check on the remote's side finds them. Sending is not a
-  //     check. When it fails, the merge still goes on and the line says how to send them:
-  //     this door was opened by what this clone holds, and the far side will notice what is missing.
-  if (policy.travel === true && tier !== undefined) {
-    const sent = sendReceipts(root, remote, commit, Date.now());
-    if (sent.kind === 'error') {
-      io.out(`  NOT SENT to ${remote}: ${sent.reason}`);
-      io.out(`  an audit on the remote will not find them. Send them: gotreceipts send ${shortCommit}`);
-    }
-    if (sent.kind === 'sent') io.out(`  sent to ${remote}: ${countOf(sent.sent)}`);
-    if (sent.kind === 'already') io.out(`  ${remote} already holds the records and approvals of this commit`);
-  }
-
-  // 6. The merge, pinned to the commit that was checked.
-  io.out(`  asking GitHub to merge commit ${shortCommit}, and no other`);
-  const request = mergePullRequest(root, {
-    number,
-    commit,
-    method: method as MergeMethod,
-    subject: options.subject,
-    body: options.body,
-  });
-  if (!request.ok) return refused('GitHub did not merge the pull request', [`GitHub said: ${request.error}`]);
-  for (const line of request.value.split('\n')) {
-    if (line.trim() !== '') io.out(`  gh: ${line.trim()}`);
-  }
-
-  if (testedTree === undefined) {
-    io.out(`VERDICT: MERGED (pull request #${number}, commit ${shortCommit} into ${base}, a branch with no level)`);
-    return EXIT.PASS;
-  }
-
-  // 7. What GitHub made, compared with what was tested. The target branch can move in the
-  //    moment between the check and the merge. That cannot be prevented from here, so it is detected.
   const after = mergeCommitOf(root, number);
   const mergeCommit = after.ok && after.value.state === 'MERGED' ? after.value.commit : undefined;
   if (mergeCommit === undefined) {
@@ -222,6 +154,7 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
     io.out(`Look at it: gh pr view ${number}`);
     return EXIT.CANNOT_RUN;
   }
+
   obtainCommit(root, remote, branchRef(base), mergeCommit);
   const resultTree = treeOf(root, mergeCommit);
   const shortMerge = shortId(mergeCommit);
@@ -232,11 +165,90 @@ export async function mergeCommand(args: readonly string[], io: Io): Promise<Exi
   if (resultTree !== testedTree) {
     io.out(`VERDICT: MERGED, BUT NOT AS TESTED (commit ${shortMerge} on ${base} holds files that no gate has seen)`);
     io.out(`"${base}" moved in the moment between the check and the merge.`);
-    io.out(`Run the gate on it now: gotreceipts gate --for ${base}   (with commit ${shortMerge} checked out)`);
+    // The merge commit was made on GitHub a moment ago, so it is never the one that is checked out here.
+    io.out(`Run the gate on it now: ${gateAdvice(base, mergeCommit, undefined)}`);
     return EXIT.REFUSED;
   }
 
   io.out(`  merged as ${shortMerge}, which holds exactly the tested files`);
-  io.out(`VERDICT: MERGED (pull request #${number}, commit ${shortCommit} into ${base})`);
+  io.out(`VERDICT: MERGED (pull request #${number}, commit ${shortId(commit)} into ${base})`);
   return EXIT.PASS;
+}
+
+export async function mergeCommand(args: readonly string[], io: Io): Promise<ExitCode> {
+  const start = readOptions({ command: 'merge', usage: MERGE_USAGE, values: ['method', 'subject', 'body'], positionals: true }, args, io);
+  if (start.done) return start.code;
+  const { options, positionals, cannotRun } = start;
+
+  const say: Say = (line) => io.out(`  ${line}`);
+  const refused = (summary: string, advice: readonly string[] = []): ExitCode => {
+    io.out(`VERDICT: REFUSED (${summary}). Nothing was merged.`);
+    for (const line of advice) io.out(line);
+    return EXIT.REFUSED;
+  };
+
+  const number = positionals.length === 1 ? pullRequestNumber(positionals[0]) : undefined;
+  if (number === undefined) return cannotRun('give the number of one pull request, for example: gotreceipts merge 12');
+
+  const method = options.method ?? 'merge';
+  if (!isMergeMethod(method)) return cannotRun(`there is no merge method "${method}" (methods: ${MERGE_METHODS.join(', ')})`);
+
+  const root = repoRoot(process.cwd());
+  if (root === undefined) return cannotRun('this folder is not inside a git repository');
+
+  // 1. The pull request, as GitHub has it now.
+  const asked = pullRequestNow(root, number);
+  if (!asked.ok) return cannotRun(asked.reason);
+  const { pullRequest } = asked;
+  const { baseRefName: base, headRefOid: commit } = pullRequest;
+  const shortCommit = shortId(commit);
+
+  io.out(`gotreceipts merge: pull request #${number}, ${pullRequest.headRefName} into ${base}`);
+  const notOpen = whyNotOpen(pullRequest);
+  if (notOpen !== undefined) return refused(notOpen);
+  if (pullRequest.isDraft) return refused(`pull request #${number} is a draft`);
+
+  // 2. The target branch and the commit, both as the remote has them now.
+  const found = targetOf(root, pullRequest);
+  if (!found.ok) return cannotRun(found.reason);
+  const { remote, target } = found;
+
+  // 3. The rules: the policy that is already on the target branch, not the pull request's own
+  //    copy, and the level that policy asks of the branch.
+  const rules = rulesFor(root, commit, target);
+  if (!rules.ok) return cannotRun(...rules.errors);
+  for (const line of policyLines(rules.source)) say(line);
+  const { tier } = rules;
+  const travels = rules.policy.travel === true;
+  const now = Date.now();
+
+  if (travels) fetchFirst(root, remote, commit, now, say);
+
+  // 4. The record, the merged result and the approval. A branch with no level asks for none of them.
+  let testedTree: string | undefined;
+  if (tier === undefined) {
+    say(`the policy sets no level for "${base}", so no record is needed`);
+  } else {
+    const before = checkBefore(root, rules, { commit, base, baseTip: target.commit, level: tier.level }, now, say);
+    if (before.kind === 'cannot-run') return cannotRun(before.reason);
+    if (before.kind === 'refused') return refused(before.summary, before.advice);
+    testedTree = before.testedTree;
+
+    if (travels) sendFirst(root, remote, commit, now, say);
+  }
+
+  // 5. The merge, pinned to the commit that was checked.
+  say(`asking GitHub to merge commit ${shortCommit}, and no other`);
+  const request = mergePullRequest(root, { number, commit, method, subject: options.subject, body: options.body });
+  if (!request.ok) return refused('GitHub did not merge the pull request', [`GitHub said: ${request.error}`]);
+  for (const line of request.value.split('\n')) {
+    if (line.trim() !== '') say(`gh: ${line.trim()}`);
+  }
+
+  // 6. What GitHub made, compared with what was tested.
+  if (testedTree === undefined) {
+    io.out(`VERDICT: MERGED (pull request #${number}, commit ${shortCommit} into ${base}, a branch with no level)`);
+    return EXIT.PASS;
+  }
+  return compareAfter(root, remote, pullRequest, testedTree, io);
 }

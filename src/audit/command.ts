@@ -1,13 +1,11 @@
-import { judgeApproval } from '../approval/judge.ts';
 import { shownAge } from '../clock.ts';
+import { proofOf, rulesFor } from '../door/judge.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { isNoCommit, remoteBranch, repoRoot, resolveCommit, shortId, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
 import { readOptions } from '../options.ts';
-import { policyFor, protectedLine } from '../policy/committed.ts';
-import { tierForBranch } from '../policy/policy.ts';
+import { protectedLine } from '../policy/committed.ts';
 import { fetchReceipts, pickRemote } from '../travel/remote.ts';
-import { judgeCommit } from '../verify/judge.ts';
 import { commitTime, entriesOf, isShallow, ownLine, type Entry } from './entries.ts';
 
 export const AUDIT_USAGE = [
@@ -82,18 +80,17 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
 
   // The policy the branch held just before. What the entry itself did to the policy file does not count.
   const shown = `"${branch}" before`;
-  const picked = policyFor(root, entry.on, { branch, commit: entry.before, shown });
-  if (!picked.ok) {
-    for (const error of picked.errors) lines.push(`could not be checked: ${error}`);
+  const rules = rulesFor(root, entry.on, { branch, commit: entry.before, shown });
+  if (!rules.ok) {
+    for (const error of rules.errors) lines.push(`could not be checked: ${error}`);
     return done('unchecked');
   }
-  if (picked.source.kind === 'own') {
+  const { source, tier } = rules;
+  if (source.kind === 'own') {
     lines.push(`"${branch}" held no policy before this, so nothing was asked`);
     return done('ok');
   }
-  const { policy, source } = picked;
   lines.push(`policy: the one "${branch}" held before, at commit ${shortId(entry.before)}`);
-  const tier = tierForBranch(policy, branch);
   if (tier === undefined) {
     lines.push(`that policy set no level for "${branch}", so nothing was asked`);
     return done('ok');
@@ -129,7 +126,8 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
     }
   }
 
-  const { decision } = judgeCommit(root, policy, entry.entered, tier.level, when);
+  // The same question the doors ask, about the commit that entered, as of the time it entered.
+  const { record: decision, approval } = proofOf(root, rules, { commit: entry.entered, level: tier.level, branch, now: when });
   if (decision.ok) {
     lines.push(`record: ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours before, as level ${tier.level} asked`);
   } else {
@@ -138,7 +136,6 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
     outcome = 'lacking';
   }
 
-  const approval = judgeApproval(root, policy, source, entry.entered, branch, when);
   switch (approval.kind) {
     case 'not-needed':
       break;
