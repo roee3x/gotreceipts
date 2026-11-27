@@ -4,10 +4,9 @@ import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { chooseLevel } from '../gate/command.ts';
 import { currentBranch, resolveCommit } from '../git.ts';
 import type { Io } from '../main.ts';
-import { policyId } from '../policy/hash.ts';
 import { loadPolicy } from '../policy/load.ts';
-import { readRecords } from '../record/store.ts';
-import { decide, shownAge } from './decide.ts';
+import { shownAge } from './decide.ts';
+import { judgeCommit } from './judge.ts';
 
 export const VERIFY_USAGE = [
   'Usage: gotreceipts verify [commit] [options]',
@@ -84,18 +83,11 @@ export async function verifyCommand(args: readonly string[], io: Io): Promise<Ex
   const chosen = chooseLevel(policy, options, currentBranch(root));
   if ('error' in chosen) return cannotRun(chosen.error);
 
-  const stored = readRecords(root, commit);
-  const decision = decide({
-    policy,
-    policyId: policyId(policy),
-    requiredLevel: chosen.level,
-    records: stored.records,
-    now: Date.now(),
-  });
+  const { decision, unreadable } = judgeCommit(root, policy, commit, chosen.level, Date.now());
 
   const shortCommit = commit.slice(0, 7);
   io.out(`gotreceipts verify: commit ${shortCommit} needs level ${chosen.level}`);
-  for (const file of stored.unreadable) {
+  for (const file of unreadable) {
     io.out(`  ignored, not a valid record: ${file}`);
   }
 

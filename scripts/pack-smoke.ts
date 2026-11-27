@@ -14,16 +14,19 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
+/** The skill that "gotreceipts install" copies into a project. It ships next to the code. */
+const SKILL = 'skills/gotreceipts/SKILL.md';
 /** The only files a published package may hold, apart from everything under dist/. */
-const ALLOWED_TOP_LEVEL = ['package.json', 'README.md', 'LICENSE'];
+const ALLOWED_OUTSIDE_DIST = ['package.json', 'README.md', 'LICENSE', SKILL];
 /** The files it must hold. */
-const REQUIRED = ['package.json', 'README.md', 'LICENSE', 'dist/cli.js'];
+const REQUIRED = ['package.json', 'README.md', 'LICENSE', 'dist/cli.js', SKILL];
 
 class SmokeFailure extends Error {}
 
 /** Runs one command line through the system shell and returns what it printed. */
-function run(commandLine: string, cwd: string): string {
-  const result = spawnSync(commandLine, { cwd, shell: true, encoding: 'utf8', windowsHide: true });
+function run(commandLine: string, cwd: string, extraEnv: Record<string, string> = {}): string {
+  const env = { ...process.env, ...extraEnv };
+  const result = spawnSync(commandLine, { cwd, shell: true, encoding: 'utf8', windowsHide: true, env });
   if (result.error !== undefined) {
     throw new SmokeFailure(`could not start: ${commandLine} (${result.error.message})`);
   }
@@ -53,7 +56,7 @@ function smoke(work: string): string {
   for (const required of REQUIRED) {
     if (!paths.includes(required)) throw new SmokeFailure(`the package is missing ${required}`);
   }
-  const unexpected = paths.filter((path) => !path.startsWith('dist/') && !ALLOWED_TOP_LEVEL.includes(path));
+  const unexpected = paths.filter((path) => !path.startsWith('dist/') && !ALLOWED_OUTSIDE_DIST.includes(path));
   if (unexpected.length > 0) {
     throw new SmokeFailure(`the package holds files it should not: ${unexpected.join(', ')}`);
   }
@@ -75,7 +78,29 @@ function smoke(work: string): string {
     throw new SmokeFailure('the installed command did not print its help');
   }
 
-  return `installed gotreceipts ${version} from a package of ${paths.length} files, and ran it`;
+  // 5. Let the installed command set up a repository. This proves that it finds the skill that
+  //    came in the package, from the place a user's copy of the tool is in.
+  //    Git is told to read no settings of the person or the machine running this.
+  const noSettings = join(work, 'gitconfig');
+  writeFileSync(noSettings, '');
+  const gitEnv = { GIT_CONFIG_GLOBAL: noSettings, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: work };
+  run('git init --quiet', project, gitEnv);
+  const policy = {
+    schema: 1,
+    levels: [{ name: 'G0', checks: [{ name: 'node', run: 'node --version' }] }],
+    tiers: [{ branch: 'main', level: 'G0' }],
+  };
+  writeFileSync(join(project, 'gotreceipts.json'), `${JSON.stringify(policy)}\n`);
+  const setUp = run(`"${launcher}" install`, project, gitEnv);
+  if (!setUp.includes('VERDICT: PASS')) {
+    throw new SmokeFailure(`the installed command could not set up a repository:\n${setUp}`);
+  }
+  const skill = join(project, '.claude', 'skills', 'gotreceipts', 'SKILL.md');
+  if (!existsSync(skill) || !readFileSync(skill, 'utf8').startsWith('---\nname: gotreceipts\n')) {
+    throw new SmokeFailure('the installed command did not write its skill into the repository');
+  }
+
+  return `installed gotreceipts ${version} from a package of ${paths.length} files, ran it, and set up a repository with it`;
 }
 
 const work = mkdtempSync(join(tmpdir(), 'gotreceipts-smoke-'));

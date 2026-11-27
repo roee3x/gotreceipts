@@ -96,14 +96,51 @@ export function tempRepo(t: TestContext, options: RepoOptions = {}): string {
   return repo;
 }
 
-/** Runs the built tool in `cwd`. */
-export function runCli(cwd: string, args: string[], extraEnv: Record<string, string> = {}): RunResult {
+/** Runs the built tool in `cwd`. `input` is what the tool reads, as if it were piped to it. */
+export function runCli(cwd: string, args: string[], extraEnv: Record<string, string> = {}, input = ''): RunResult {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, ...extraEnv },
+    input,
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/**
+ * Makes an empty repository that `repo` can push to, the way a server would hold it,
+ * and adds it to `repo` under the name "origin". Returns its folder.
+ */
+export function addRemote(t: TestContext, repo: string): string {
+  const remote = mkdtempSync(join(tmpdir(), 'gotreceipts-remote-'));
+  t.after(() => rmSync(remote, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  assert.equal(gitIn(remote, 'init', '--quiet', '--bare').status, 0);
+  assert.equal(gitIn(repo, 'remote', 'add', 'origin', remote).status, 0);
+  return remote;
+}
+
+/**
+ * An environment in which git reads no settings and no ignore list of the person running the
+ * tests. Some machines ignore a file for every repository. A test about what git ignores must
+ * mean the same on every machine, so it runs with this.
+ */
+export function noPersonalGitSettings(t: TestContext): Record<string, string> {
+  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-gitconfig-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const empty = join(folder, 'gitconfig');
+  writeFileSync(empty, '');
+  return { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: folder };
+}
+
+/** What git lists as changed or new in `repo`, one file per line. Empty when the folder is clean. */
+export function looseFiles(repo: string, extraEnv: Record<string, string> = {}): string {
+  const result = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, ...extraEnv },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
 }
 
 /** The last line of some output that is not empty. */
