@@ -20,6 +20,11 @@ export interface Step {
   readonly parents: readonly string[];
 }
 
+/** A commit with two parents or more: here, something came in from the side. */
+function isMerge(step: Step): boolean {
+  return step.parents.length >= 2;
+}
+
 export interface Entry {
   /** "many-parents": more than two lines of history meet in one commit. */
   readonly kind: 'merge' | 'push' | 'many-parents';
@@ -33,31 +38,37 @@ export interface Entry {
   readonly commits: number;
 }
 
+function mergeEntry(step: Step): Entry {
+  const [before, merged, ...more] = step.parents;
+  // With more than two parents nobody can say which commit entered, so the merge stands for itself.
+  const one = more.length === 0 && merged !== undefined;
+  return { kind: one ? 'merge' : 'many-parents', on: step.commit, before, entered: one ? merged : step.commit, commits: 1 };
+}
+
+/** `pushed` is a run of commits that each have one parent at most, newest first. */
+function pushEntry(pushed: readonly Step[], newest: Step): Entry {
+  return { kind: 'push', on: newest.commit, before: pushed[pushed.length - 1]?.parents[0], entered: newest.commit, commits: pushed.length };
+}
+
 /** Groups the branch's own line into entries. `steps` and the result are newest first. */
 export function entriesOf(steps: readonly Step[]): Entry[] {
   const entries: Entry[] = [];
-  let index = 0;
-  while (index < steps.length) {
-    const step = steps[index];
-    if (step === undefined) break;
-    if (step.parents.length >= 2) {
-      const merged = step.parents[1];
-      entries.push({
-        kind: step.parents.length === 2 ? 'merge' : 'many-parents',
-        on: step.commit,
-        before: step.parents[0],
-        entered: step.parents.length === 2 && merged !== undefined ? merged : step.commit,
-        commits: 1,
-      });
-      index += 1;
+  let pushed: Step[] = [];
+  const closePush = (): void => {
+    const newest = pushed[0];
+    if (newest !== undefined) entries.push(pushEntry(pushed, newest));
+    pushed = [];
+  };
+
+  for (const step of steps) {
+    if (!isMerge(step)) {
+      pushed.push(step);
       continue;
     }
-    // A run of commits that each have one parent: pushed straight onto the branch.
-    let last = index;
-    while ((steps[last + 1]?.parents.length ?? 2) <= 1) last += 1;
-    entries.push({ kind: 'push', on: step.commit, before: steps[last]?.parents[0], entered: step.commit, commits: last - index + 1 });
-    index = last + 1;
+    closePush();
+    entries.push(mergeEntry(step));
   }
+  closePush();
   return entries;
 }
 
@@ -77,22 +88,28 @@ export type OwnLine =
 export function ownLine(root: string, tip: string, since: string | undefined): OwnLine {
   const listed = git(['rev-list', '--parents', tip, ...(since === undefined ? [] : [`^${since}`])], root);
   if (!listed.ok) return { ok: false, reason: 'git could not read the history of the branch' };
+  // Each line is a commit, then its parents.
   const parentsOf = new Map<string, string[]>();
   for (const line of listed.stdout.split('\n')) {
     const [commit, ...parents] = line.trim().split(/\s+/);
     if (commit !== undefined && commit !== '') parentsOf.set(commit, parents);
   }
 
+  const onlyTheLastEntry = since === undefined;
   const steps: Step[] = [];
   let at: string | undefined = tip;
   while (at !== undefined && at !== since) {
     const parents = parentsOf.get(at);
     if (parents === undefined) break;
-    if (since === undefined && steps.length > 0 && parents.length >= 2) break;
-    steps.push({ commit: at, parents });
-    if (since === undefined && parents.length >= 2) break;
+    const step: Step = { commit: at, parents };
+    // A merge below pushed commits belongs to the entry before the last one.
+    if (onlyTheLastEntry && isMerge(step) && steps.length > 0) break;
+    steps.push(step);
+    // A merge at the top is the last entry, all of it.
+    if (onlyTheLastEntry && isMerge(step)) break;
     at = parents[0];
   }
+
   if (since !== undefined && at !== since) {
     return {
       ok: false,

@@ -5,6 +5,19 @@ import { checkSignature } from './ssh.ts';
 import { parseApproval } from './statement.ts';
 import { readApprovalFiles } from './store.ts';
 
+/** Why a commit that needs an approval has none that counts, as a code. */
+export type ApprovalProblem =
+  /** There is no approval of this commit for this branch. */
+  | 'missing'
+  /** The signature is not by a listed key, or not over these bytes. */
+  | 'signature'
+  /** What was signed does not read as an approval. */
+  | 'unreadable'
+  | 'other-commit'
+  | 'other-branch'
+  | 'from-the-future'
+  | 'too-old';
+
 export type ApprovalDecision =
   /** The commit may enter the branch without an approval. */
   | { readonly kind: 'not-needed' }
@@ -14,9 +27,21 @@ export type ApprovalDecision =
    */
   | { readonly kind: 'not-locked' }
   | { readonly kind: 'approved'; readonly reasons: readonly string[]; readonly signer: string; readonly ageHours: number }
-  | { readonly kind: 'refused'; readonly reasons: readonly string[]; readonly detail: string }
+  | {
+      readonly kind: 'refused';
+      readonly reasons: readonly string[];
+      /** Why, as a code, for a caller that says it in words of its own. */
+      readonly problem: ApprovalProblem;
+      /** Why, as a sentence. */
+      readonly detail: string;
+    }
   /** It needs an approval, and whether it has one could not be found out. Never a pass. */
   | { readonly kind: 'cannot-check'; readonly reasons: readonly string[]; readonly reason: string };
+
+/** The sentence about an approval that is there and does not count. */
+export function notCounting(why: string): string {
+  return `the approval that is there does not count: ${why}`;
+}
 
 /**
  * Why a commit needs an approval before it may enter a branch. An empty list: it needs none.
@@ -58,26 +83,28 @@ export function judgeApproval(
   const { signers, maxAgeHours } = policy.approval;
 
   const files = readApprovalFiles(root, commit, branch);
-  if (files === undefined) return { kind: 'refused', reasons, detail: `there is no approval of this commit for "${branch}"` };
-  const doesNotCount = (why: string): ApprovalDecision => ({ kind: 'refused', reasons, detail: `the approval that is there does not count: ${why}` });
+  if (files === undefined) {
+    return { kind: 'refused', reasons, problem: 'missing', detail: `there is no approval of this commit for "${branch}"` };
+  }
+  const doesNotCount = (problem: ApprovalProblem, why: string): ApprovalDecision => ({ kind: 'refused', reasons, problem, detail: notCounting(why) });
 
   // The signature first. Until it is checked, nothing the file says is believed.
   const signature = checkSignature(signers, files.statement, files.signatureFile);
   if (signature.kind === 'cannot-check') return { kind: 'cannot-check', reasons, reason: signature.reason };
-  if (signature.kind === 'bad') return doesNotCount(signature.reason);
+  if (signature.kind === 'bad') return doesNotCount('signature', signature.reason);
 
   // Then what was signed: this commit, into this branch.
   const parsed = parseApproval(files.statement.toString('utf8'));
-  if (!parsed.ok) return doesNotCount(parsed.error);
+  if (!parsed.ok) return doesNotCount('unreadable', parsed.error);
   const { approval } = parsed;
-  if (approval.commit !== commit) return doesNotCount('it approves another commit');
-  if (approval.branch !== branch) return doesNotCount('it approves another branch');
+  if (approval.commit !== commit) return doesNotCount('other-commit', 'it approves another commit');
+  if (approval.branch !== branch) return doesNotCount('other-branch', 'it approves another branch');
 
   // And when. An approval counts for as long as the policy says, and not before it was given.
   const approvedAt = Date.parse(approval.approvedAt);
-  if (isInTheFuture(approvedAt, now)) return doesNotCount('it is dated in the future');
+  if (isInTheFuture(approvedAt, now)) return doesNotCount('from-the-future', 'it is dated in the future');
   const ageHours = hoursSince(approvedAt, now);
-  if (ageHours > maxAgeHours) return doesNotCount(`it is older than the ${maxAgeHours} hours an approval counts for`);
+  if (ageHours > maxAgeHours) return doesNotCount('too-old', `it is older than the ${maxAgeHours} hours an approval counts for`);
 
   return { kind: 'approved', reasons, signer: signature.signer, ageHours };
 }

@@ -1,8 +1,8 @@
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
-import { commitAskedFor, readOptions } from '../options.ts';
-import { countOf, RECEIPTS_PREFIX } from './receipts.ts';
+import { commitAskedFor, readOptions, type CannotRun } from '../options.ts';
+import { countOf, RECEIPTS_PREFIX } from './receipt.ts';
 import { fetchReceipts, pickRemote, sendReceipts } from './remote.ts';
 
 const WHERE = [
@@ -55,68 +55,64 @@ export const FETCH_USAGE = [
   'Exit codes: 0 = done, also when the remote holds nothing, 2 = the command could not run.',
 ].join('\n');
 
-interface Asked {
-  readonly root: string;
-  readonly commit: string;
-  readonly remote: string;
-}
+/** What both commands work on: one commit, and one remote. */
+type Asked =
+  | { readonly done: true; readonly code: ExitCode }
+  | { readonly done: false; readonly root: string; readonly commit: string; readonly remote: string; readonly cannotRun: CannotRun };
 
 /** The part both commands share: the options, the commit and the remote. */
-function ask(name: 'send' | 'fetch', usage: string, args: readonly string[], io: Io): Asked | ExitCode {
-  const start = readOptions({ command: name, usage, values: ['remote'], positionals: true }, args, io);
-  if (start.done) return start.code;
+function ask(command: 'send' | 'fetch', usage: string, args: readonly string[], io: Io): Asked {
+  const start = readOptions({ command, usage, values: ['remote'], positionals: true }, args, io);
+  if (start.done) return start;
   const { options, positionals, cannotRun } = start;
+  const stop = (...reasons: readonly string[]): Asked => ({ done: true, code: cannotRun(...reasons) });
 
-  if (positionals.length > 1) return cannotRun('name one commit, not several');
+  if (positionals.length > 1) return stop('name one commit, not several');
   const root = repoRoot(process.cwd());
-  if (root === undefined) return cannotRun('this folder is not inside a git repository');
+  if (root === undefined) return stop('this folder is not inside a git repository');
   const asked = commitAskedFor(root, positionals[0]);
-  if (!asked.ok) return cannotRun(asked.reason);
+  if (!asked.ok) return stop(asked.reason);
   const remote = pickRemote(root, options.remote);
-  if (!remote.ok) return cannotRun(remote.reason);
-  return { root, commit: asked.commit, remote: remote.name };
+  if (!remote.ok) return stop(remote.reason);
+  return { done: false, root, commit: asked.commit, remote: remote.name, cannotRun };
 }
 
 export async function sendCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   const asked = ask('send', SEND_USAGE, args, io);
-  if (typeof asked === 'number') return asked;
-  const { root, commit, remote } = asked;
+  if (asked.done) return asked.code;
+  const { root, commit, remote, cannotRun } = asked;
   const shortCommit = shortId(commit);
 
   io.out(`gotreceipts send: commit ${shortCommit}, to ${remote}`);
   const sent = sendReceipts(root, remote, commit, Date.now());
-  if (sent.kind === 'error') {
-    io.err(`gotreceipts send: CANNOT RUN: ${sent.reason}`);
-    return EXIT.CANNOT_RUN;
+  switch (sent.kind) {
+    case 'error':
+      return cannotRun(sent.reason);
+    case 'nothing':
+      io.out(`  this clone holds no record and no approval of commit ${shortCommit}`);
+      io.out('Nothing was sent.');
+      return EXIT.PASS;
+    case 'already':
+      io.out(`  ${remote} already holds what this clone holds: ${countOf(sent.held)}`);
+      io.out('Nothing was sent.');
+      return EXIT.PASS;
+    case 'sent':
+      io.out(`  sent: ${countOf(sent.sent)}`);
+      io.out(`  ${remote} now holds ${countOf(sent.held)} of this commit`);
+      io.out(`Sent. Another clone gets them with: gotreceipts fetch ${shortCommit}`);
+      return EXIT.PASS;
   }
-  if (sent.kind === 'nothing') {
-    io.out(`  this clone holds no record and no approval of commit ${shortCommit}`);
-    io.out('Nothing was sent.');
-    return EXIT.PASS;
-  }
-  if (sent.kind === 'already') {
-    io.out(`  ${remote} already holds what this clone holds: ${countOf(sent.held)}`);
-    io.out('Nothing was sent.');
-    return EXIT.PASS;
-  }
-  io.out(`  sent: ${countOf(sent.sent)}`);
-  io.out(`  ${remote} now holds ${countOf(sent.held)} of this commit`);
-  io.out(`Sent. Another clone gets them with: gotreceipts fetch ${shortCommit}`);
-  return EXIT.PASS;
 }
 
 export async function fetchCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   const asked = ask('fetch', FETCH_USAGE, args, io);
-  if (typeof asked === 'number') return asked;
-  const { root, commit, remote } = asked;
+  if (asked.done) return asked.code;
+  const { root, commit, remote, cannotRun } = asked;
   const shortCommit = shortId(commit);
 
   io.out(`gotreceipts fetch: commit ${shortCommit}, from ${remote}`);
   const got = fetchReceipts(root, remote, commit, Date.now());
-  if (got.kind === 'error') {
-    io.err(`gotreceipts fetch: CANNOT RUN: ${got.reason}`);
-    return EXIT.CANNOT_RUN;
-  }
+  if (got.kind === 'error') return cannotRun(got.reason);
   if (got.kind === 'none' || got.held.length === 0) {
     io.out(`  ${remote} holds no record and no approval of commit ${shortCommit}`);
     io.out('Nothing was fetched.');

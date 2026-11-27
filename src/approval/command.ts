@@ -12,7 +12,7 @@ import { pullRequestNow, pullRequestNumber, targetOf, whyNotOpen } from '../merg
 import { commitAskedFor, readOptions } from '../options.ts';
 import { knownTarget, type PolicySource, type Target } from '../policy/committed.ts';
 import { isProtectedPath, type Policy } from '../policy/policy.ts';
-import { countOf } from '../travel/receipts.ts';
+import { countOf } from '../travel/receipt.ts';
 import { pickRemote, sendReceipts } from '../travel/remote.ts';
 import { readVersion } from '../version.ts';
 import { checkSignature, signFile } from './ssh.ts';

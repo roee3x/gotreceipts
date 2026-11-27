@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { approvalText, newApproval } from '../src/approval/statement.ts';
 import type { GateRecord } from '../src/record/record.ts';
-import { countOf, mergeReceipts, notFromTheFuture, receiptsRef, sameReceipts, sortIntoReceipts, type Receipt } from '../src/travel/receipts.ts';
+import { countOf, mergeReceipts, notFromTheFuture, receiptsRef, sortIntoReceipts, type Receipt } from '../src/travel/receipt.ts';
 
 const COMMIT = 'a'.repeat(40);
 const OTHER_COMMIT = 'd'.repeat(40);
@@ -35,6 +35,21 @@ function approvalFiles(branch: string, commit = COMMIT, when = Date.parse('2026-
 
 function keys(receipts: readonly Receipt[]): string[] {
   return receipts.map((receipt) => receipt.key);
+}
+
+/** True when two receipts hold the same files with the same content. */
+function sameReceipt(a: Receipt, b: Receipt): boolean {
+  if (a.files.size !== b.files.size) return false;
+  for (const [path, content] of a.files) {
+    const other = b.files.get(path);
+    if (other === undefined || !other.equals(content)) return false;
+  }
+  return true;
+}
+
+/** True when both sets hold the same receipts. */
+function sameReceipts(a: readonly Receipt[], b: readonly Receipt[]): boolean {
+  return a.length === b.length && a.every((receipt) => b.some((other) => other.key === receipt.key && sameReceipt(receipt, other)));
 }
 
 test('the place on the remote is named after the commit, outside the branches and the tags', () => {
