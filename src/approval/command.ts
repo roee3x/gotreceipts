@@ -3,26 +3,26 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-import { shownAge } from '../clock.ts';
+import { proofOf, rulesFor, type Proof } from '../door/judge.ts';
+import { approvalLines, countedRecord, policyLines, policyWords } from '../door/report.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { differingFiles, git, obtainCommit, remoteBranch, repoRoot, shortId } from '../git.ts';
+import { differingFiles, git, repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
-import { remoteFor } from '../merge/command.ts';
-import { viewPullRequest } from '../merge/github.ts';
+import { pullRequestNow, pullRequestNumber, targetOf, whyNotOpen } from '../merge/target.ts';
 import { commitAskedFor, readOptions } from '../options.ts';
-import { knownTarget, policyFor, sourceLines, type Target } from '../policy/committed.ts';
-import { isProtectedPath, tierForBranch } from '../policy/policy.ts';
+import { knownTarget, type PolicySource, type Target } from '../policy/committed.ts';
+import { isProtectedPath, type Policy } from '../policy/policy.ts';
 import { countOf } from '../travel/receipts.ts';
-import { pickRemote, sendReceipts, type Sent } from '../travel/remote.ts';
-import { judgeCommit } from '../verify/judge.ts';
+import { pickRemote, sendReceipts } from '../travel/remote.ts';
 import { readVersion } from '../version.ts';
-import { approvalLines, judgeApproval } from './judge.ts';
 import { checkSignature, signFile } from './ssh.ts';
 import { approvalText, newApproval } from './statement.ts';
 import { approvalLabel, keepApproval } from './store.ts';
 
 /** Where the approval key is looked for when no other file is named. */
 const DEFAULT_KEY = join('.ssh', 'gotreceipts_approval');
+/** The same place, the way it is written in the help and in a message. */
+const DEFAULT_KEY_SHOWN = `~/${DEFAULT_KEY.replace(/\\/g, '/')}`;
 /** The word the person types to sign. A whole word, so that it is not typed by reflex. */
 const CONFIRM_WORD = 'approve';
 /** How many changed files are written out before the rest is only counted. */
@@ -48,7 +48,7 @@ export const APPROVE_USAGE = [
   '                           GitHub is asked, through the "gh" tool',
   '',
   'Options:',
-  `  --key <file>      The private key to sign with. Default: ~/${DEFAULT_KEY.replace(/\\/g, '/')}`,
+  `  --key <file>      The private key to sign with. Default: ${DEFAULT_KEY_SHOWN}`,
   '  -h, --help        Show this help',
   '',
   'An approval counts only when the public half of the key is listed in the policy that is',
@@ -63,6 +63,90 @@ export const APPROVE_USAGE = [
   '',
   'Exit codes: 0 = approved, 1 = not approved, 2 = the command could not run.',
 ].join('\n');
+
+// --- 1. which commit, into which branch ---
+
+/** What is to be approved: one commit, into one branch, and where that branch is now. */
+interface Subject {
+  readonly commit: string;
+  readonly branch: string;
+  readonly target: Target;
+  /** The remote the pull request lives on, when the approval was asked for by its number. */
+  readonly remote: string | undefined;
+}
+
+type SubjectChoice = ({ readonly ok: true } & Subject) | { readonly ok: false; readonly reason: string };
+
+/** The head commit of a pull request, into its target branch. As in "merge", the branch is asked from the remote itself. */
+function subjectOfPullRequest(root: string, typed: string): SubjectChoice {
+  const no = (reason: string): SubjectChoice => ({ ok: false, reason });
+
+  const number = pullRequestNumber(typed);
+  if (number === undefined) return no('give the number of one pull request, for example: gotreceipts approve --pr 12');
+  const asked = pullRequestNow(root, number);
+  if (!asked.ok) return no(asked.reason);
+  const { pullRequest } = asked;
+  const notOpen = whyNotOpen(pullRequest);
+  if (notOpen !== undefined) return no(notOpen);
+
+  const found = targetOf(root, pullRequest);
+  if (!found.ok) return no(found.reason);
+  return { ok: true, commit: pullRequest.headRefOid, branch: pullRequest.baseRefName, target: found.target, remote: found.remote };
+}
+
+/** A commit that was named, or the one that is checked out, into a branch as this clone last saw it. */
+function subjectNamed(root: string, named: string | undefined, branch: string | undefined): SubjectChoice {
+  if (branch === undefined) {
+    return { ok: false, reason: 'say which branch the commit is approved into: --for <branch>, or name a pull request with --pr' };
+  }
+  const asked = commitAskedFor(root, named);
+  if (!asked.ok) return asked;
+  return { ok: true, commit: asked.commit, branch, target: knownTarget(root, branch), remote: undefined };
+}
+
+// --- 2. what is shown before anything is signed ---
+
+/** The files that would change on the target branch, the protected ones first. They are the reason a person is asked at all. */
+function changeLines(root: string, policy: Policy, source: PolicySource, commit: string): string[] {
+  if (source.kind !== 'target') return [];
+  const files = differingFiles(root, source.commit, commit) ?? [];
+  const marked = files.map((path) => ({ path, protected: isProtectedPath(policy, path) }));
+  marked.sort((a, b) => Number(b.protected) - Number(a.protected));
+
+  const rest = marked.length - FILES_SHOWN;
+  return [
+    `changes: ${files.length} ${files.length === 1 ? 'file is' : 'files are'} not the same as on ${source.shown}`,
+    ...marked.slice(0, FILES_SHOWN).map((file) => `  ${file.protected ? '[protected] ' : ''}${file.path}`),
+    ...(rest > 0 ? [`  and ${rest} more. All of them: git diff --stat ${shortId(source.commit)} ${shortId(commit)}`] : []),
+  ];
+}
+
+/** Where the commit stands now: its record, and whether anything asks for an approval at all. */
+function standingLines(proof: Proof, branch: string): string[] {
+  const { record, approval } = proof;
+  return [
+    record.ok
+      ? `record: ${countedRecord(record)}`
+      : `record: NONE THAT COUNTS (${record.summary}). An approval does not replace the record: the gate must still pass`,
+    ...(approval.kind === 'not-needed' ? [`approval: nothing asks for one. This commit may enter "${branch}" without it`] : approvalLines(approval)),
+  ];
+}
+
+// --- 3. the key, and the word ---
+
+type KeyChoice = { readonly ok: true; readonly file: string } | { readonly ok: false; readonly reason: string };
+
+function keyFile(named: string | undefined): KeyChoice {
+  const file = named ?? join(homedir(), DEFAULT_KEY);
+  if (existsSync(file)) return { ok: true, file };
+  return {
+    ok: false,
+    reason:
+      named !== undefined
+        ? `there is no key file "${named}"`
+        : `there is no approval key at ${DEFAULT_KEY_SHOWN}. Make one with "ssh-keygen -t ed25519 -f ~/.ssh/gotreceipts_approval", or name another with --key`,
+  };
+}
 
 /** The first line that arrives on the input, or an empty text when the input ends without one. */
 function readAnswer(): Promise<string> {
@@ -80,16 +164,74 @@ function readAnswer(): Promise<string> {
   });
 }
 
+// --- 4. signing ---
+
+type Signing =
+  | { readonly kind: 'signed'; readonly signer: string }
+  | { readonly kind: 'not-approved'; readonly why: string; readonly more: readonly string[] }
+  | { readonly kind: 'cannot-run'; readonly reason: string };
+
+/** What the policy says about approvals: who may sign, and for how long a signature counts. */
+type ApprovalRules = NonNullable<Policy['approval']>;
+
+/**
+ * Writes the approval, signs it, checks the new signature the way every door will, and only
+ * then keeps it in this clone. It is done in a folder of its own, which is removed again.
+ */
+function signAndKeep(root: string, subject: Subject, approval: ApprovalRules, key: string, now: number): Signing {
+  const { commit, branch } = subject;
+  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-approve-'));
+  try {
+    const statementFile = join(folder, 'approval.json');
+    writeFileSync(statementFile, approvalText(newApproval(commit, branch, readVersion(), now)));
+
+    const signed = signFile(key, statementFile);
+    if (!signed.ok) return { kind: 'not-approved', why: `nothing was signed: ${signed.reason}`, more: [] };
+
+    const check = checkSignature(approval.signers, readFileSync(statementFile), signed.signatureFile);
+    if (check.kind === 'cannot-check') return { kind: 'cannot-run', reason: `the new signature could not be checked: ${check.reason}` };
+    if (check.kind === 'bad') {
+      return {
+        kind: 'not-approved',
+        why: 'the key that signed is not one the policy lists, so the signature would not count',
+        more: [`Its public half must be listed under approval.signers in gotreceipts.json, on "${branch}" itself.`],
+      };
+    }
+
+    if (!keepApproval(root, commit, branch, statementFile, signed.signatureFile)) {
+      return { kind: 'cannot-run', reason: 'the approval was signed, and could not be written into the .git folder' };
+    }
+    return { kind: 'signed', signer: check.signer };
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+// --- 5. sending ---
+
+/**
+ * Sends the new approval to the remote, so that another clone and CI can see it, and says in
+ * one line what happened. `notSent` is the reason when it did not go.
+ *
+ * The clock is read here, and not taken from the start of the run: between the two a person
+ * read the screen and typed, and that can take minutes.
+ */
+function sendOn(root: string, subject: Subject): { readonly line: string; readonly notSent?: string } {
+  const notSent = (reason: string) => ({ line: `NOT SENT to the remote: ${reason}`, notSent: reason });
+
+  const remote = pickRemote(root, subject.remote);
+  if (!remote.ok) return notSent(remote.reason);
+  const sent = sendReceipts(root, remote.name, subject.commit, Date.now());
+  if (sent.kind === 'error') return notSent(sent.reason);
+  return { line: sent.kind === 'sent' ? `sent to ${remote.name}: ${countOf(sent.sent)}` : `${remote.name} already holds it` };
+}
+
 export async function approveCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   const start = readOptions({ command: 'approve', usage: APPROVE_USAGE, values: ['for', 'pr', 'key'], positionals: true }, args, io);
   if (start.done) return start.code;
   const { options, positionals, cannotRun } = start;
 
-  const notApproved = (why: string, more: readonly string[] = []): ExitCode => {
-    io.out(`VERDICT: NOT APPROVED (${why})`);
-    for (const line of more) io.out(line);
-    return EXIT.REFUSED;
-  };
+  const say = (line: string): void => io.out(`  ${line}`);
 
   if (positionals.length > 1) return cannotRun('name one commit, not several');
   if (options.pr !== undefined && (options.for !== undefined || positionals.length > 0)) {
@@ -100,158 +242,64 @@ export async function approveCommand(args: readonly string[], io: Io): Promise<E
   if (root === undefined) return cannotRun('this folder is not inside a git repository');
 
   // 1. Which commit, into which branch, and where that branch is now.
-  let commit: string;
-  let branch: string;
-  let target: Target;
-  /** The remote the pull request lives on, when the approval was asked for by its number. */
-  let remoteOfPullRequest: string | undefined;
-
-  if (options.pr !== undefined) {
-    const wanted = options.pr.replace(/^#/, '');
-    if (!/^[1-9]\d*$/.test(wanted)) return cannotRun('give the number of one pull request, for example: gotreceipts approve --pr 12');
-    const number = Number(wanted);
-    const viewed = viewPullRequest(root, number);
-    if (!viewed.ok) return cannotRun(`GitHub could not be asked about pull request #${number}: ${viewed.error}`);
-    const pullRequest = viewed.value;
-    if (pullRequest.state !== 'OPEN') {
-      return cannotRun(`pull request #${number} is not open: GitHub shows it as ${pullRequest.state.toLowerCase()}`);
-    }
-    commit = pullRequest.headRefOid;
-    branch = pullRequest.baseRefName;
-
-    // As in the merge command: the target branch is asked from the remote itself.
-    const remote = remoteFor(root, pullRequest.url);
-    if (remote === undefined) return cannotRun('this repository has no remote, so the target branch cannot be read');
-    const onRemote = remoteBranch(root, remote, branch);
-    if (onRemote.kind === 'unknown') return cannotRun(`the remote "${remote}" could not say where "${branch}" is now`);
-    if (onRemote.kind === 'not-downloaded') return cannotRun(`the newest commit of "${branch}" could not be downloaded`);
-    if (!obtainCommit(root, remote, `refs/pull/${number}/head`, commit)) {
-      return cannotRun(`commit ${shortId(commit)} of the pull request could not be downloaded`);
-    }
-    target = { branch, commit: onRemote.commit, shown: `${remote}/${branch}` };
-    remoteOfPullRequest = remote;
-  } else {
-    if (options.for === undefined) return cannotRun('say which branch the commit is approved into: --for <branch>, or name a pull request with --pr');
-    const asked = commitAskedFor(root, positionals[0]);
-    if (!asked.ok) return cannotRun(asked.reason);
-    commit = asked.commit;
-    branch = options.for;
-    target = knownTarget(root, branch);
-  }
+  const subject = options.pr !== undefined ? subjectOfPullRequest(root, options.pr) : subjectNamed(root, positionals[0], options.for);
+  if (!subject.ok) return cannotRun(subject.reason);
+  const { commit, branch } = subject;
   const shortCommit = shortId(commit);
 
-  // 2. The policy the commit is judged by: the one on the target branch. Its signers are the ones that count.
-  const picked = policyFor(root, commit, target);
-  if (!picked.ok) return cannotRun(...picked.errors);
-  const { policy, source } = picked;
-  const [policyLine = '', ...policyNotes] = sourceLines(source);
-
-  const tier = tierForBranch(policy, branch);
+  // 2. The rules the commit is judged by: the policy on the target branch. Its signers are the ones that count.
+  const rules = rulesFor(root, commit, subject.target);
+  if (!rules.ok) return cannotRun(...rules.errors);
+  const { policy, source, tier } = rules;
   if (tier === undefined) return cannotRun(`the policy sets no level for "${branch}", so nothing there asks for an approval`);
-  if (policy.approval === undefined) {
+  const { approval } = policy;
+  if (approval === undefined) {
     return cannotRun(
-      `the policy (${policyLine}) lists no signer, so there is no key an approval could be checked against. A first key is listed under approval.signers in gotreceipts.json`,
+      `the policy (${policyWords(source).which}) lists no signer, so there is no key an approval could be checked against. A first key is listed under approval.signers in gotreceipts.json`,
     );
   }
 
   // 3. What is about to be approved, shown before anything is signed.
   const now = Date.now();
-  const subject = git(['log', '-1', '--format=%s', commit], root).stdout.trim();
+  const proof = proofOf(root, rules, { commit, level: tier.level, branch, now });
+  const title = git(['log', '-1', '--format=%s', commit], root).stdout.trim();
   io.out(`gotreceipts approve: commit ${shortCommit} into "${branch}"`);
-  io.out(`  commit: ${shortCommit} ${subject}`);
-  io.out(`  policy: ${policyLine}`);
-  for (const note of policyNotes) io.out(`  ${note}`);
-
-  const { decision } = judgeCommit(root, policy, commit, tier.level, now);
-  io.out(
-    decision.ok
-      ? `  record: ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago, under the current policy`
-      : `  record: NONE THAT COUNTS (${decision.summary}). An approval does not replace the record: the gate must still pass`,
-  );
-
-  const standing = judgeApproval(root, policy, source, commit, branch, now);
-  if (standing.kind === 'not-needed') {
-    io.out(`  approval: nothing asks for one. This commit may enter "${branch}" without it`);
-  } else {
-    for (const line of approvalLines(standing)) io.out(`  ${line}`);
-  }
-
-  if (source.kind === 'target') {
-    const files = differingFiles(root, source.commit, commit) ?? [];
-    const marked = files.map((path) => ({ path, protected: isProtectedPath(policy, path) }));
-    // The protected ones first. They are the reason a person is asked at all.
-    marked.sort((a, b) => Number(b.protected) - Number(a.protected));
-    io.out(`  changes: ${files.length} ${files.length === 1 ? 'file is' : 'files are'} not the same as on ${source.shown}`);
-    for (const file of marked.slice(0, FILES_SHOWN)) io.out(`    ${file.protected ? '[protected] ' : ''}${file.path}`);
-    if (marked.length > FILES_SHOWN) io.out(`    and ${marked.length - FILES_SHOWN} more. All of them: git diff --stat ${shortId(source.commit)} ${shortCommit}`);
-  }
-  io.out(`  signers the policy lists: ${policy.approval.signers.map((signer) => signer.name).join(', ')}`);
+  say(`commit: ${shortCommit} ${title}`);
+  for (const line of [...policyLines(source), ...standingLines(proof, branch), ...changeLines(root, policy, source, commit)]) say(line);
+  say(`signers the policy lists: ${approval.signers.map((signer) => signer.name).join(', ')}`);
 
   // 4. The key.
-  const keyFile = options.key ?? join(homedir(), DEFAULT_KEY);
-  if (!existsSync(keyFile)) {
-    return cannotRun(
-      options.key !== undefined
-        ? `there is no key file "${options.key}"`
-        : `there is no approval key at ~/${DEFAULT_KEY.replace(/\\/g, '/')}. Make one with "ssh-keygen -t ed25519 -f ~/.ssh/gotreceipts_approval", or name another with --key`,
-    );
-  }
+  const key = keyFile(options.key);
+  if (!key.ok) return cannotRun(key.reason);
 
   // 5. The person says yes, in a whole word.
   io.out('');
   io.out(`Type "${CONFIRM_WORD}" and press Enter to sign this. Anything else stops here.`);
-  if ((await readAnswer()) !== CONFIRM_WORD) return notApproved('stopped before signing. Nothing was signed');
-
-  // 6. Sign, in a folder of its own, then check the signature the way every door will.
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-approve-'));
-  try {
-    const statementFile = join(folder, 'approval.json');
-    writeFileSync(statementFile, approvalText(newApproval(commit, branch, readVersion(), now)));
-
-    const signed = signFile(keyFile, statementFile);
-    if (!signed.ok) return notApproved(`nothing was signed: ${signed.reason}`);
-
-    const check = checkSignature(policy.approval.signers, readFileSync(statementFile), signed.signatureFile);
-    if (check.kind === 'cannot-check') return cannotRun(`the new signature could not be checked: ${check.reason}`);
-    if (check.kind === 'bad') {
-      return notApproved('the key that signed is not one the policy lists, so the signature would not count', [
-        `Its public half must be listed under approval.signers in gotreceipts.json, on "${branch}" itself.`,
-      ]);
-    }
-
-    if (!keepApproval(root, commit, branch, statementFile, signed.signatureFile)) {
-      return cannotRun('the approval was signed, and could not be written into the .git folder');
-    }
-    io.out(`  signed by ${check.signer}`);
-    io.out(`  kept as ${approvalLabel(commit, branch)}`);
-    io.out(`  it counts for ${policy.approval.maxAgeHours} hours, for this commit and this branch only`);
-
-    // 7. When the policy says records and approvals travel, it goes to the remote now, so that
-    //    another clone and CI can see it. The approval stands either way: it is signed and kept.
-    let notSent: string | undefined;
-    if (policy.travel === true) {
-      const remote = pickRemote(root, remoteOfPullRequest);
-      const sent: Sent = remote.ok ? sendReceipts(root, remote.name, commit, Date.now()) : { kind: 'error', reason: remote.reason };
-      if (sent.kind === 'error') {
-        notSent = sent.reason;
-        io.out(`  NOT SENT to the remote: ${sent.reason}`);
-      } else if (remote.ok) {
-        io.out(
-          sent.kind === 'sent'
-            ? `  sent to ${remote.name}: ${countOf(sent.sent)}`
-            : `  ${remote.name} already holds it`,
-        );
-      }
-    } else {
-      io.out(`  it stays in this clone. To let another clone or CI see it: gotreceipts send ${shortCommit}`);
-    }
-
-    io.out(`VERDICT: APPROVED (commit ${shortCommit} into "${branch}", by ${check.signer})`);
-    if (notSent !== undefined) {
-      io.out(`It is signed and kept, and other clones and CI cannot see it yet. Send it: gotreceipts send ${shortCommit}`);
-    }
-    return EXIT.PASS;
-  } finally {
-    rmSync(folder, { recursive: true, force: true });
+  if ((await readAnswer()) !== CONFIRM_WORD) {
+    io.out('VERDICT: NOT APPROVED (stopped before signing. Nothing was signed)');
+    return EXIT.REFUSED;
   }
+
+  // 6. Sign, check the signature, keep it.
+  const signing = signAndKeep(root, subject, approval, key.file, now);
+  if (signing.kind === 'cannot-run') return cannotRun(signing.reason);
+  if (signing.kind === 'not-approved') {
+    io.out(`VERDICT: NOT APPROVED (${signing.why})`);
+    for (const line of signing.more) io.out(line);
+    return EXIT.REFUSED;
+  }
+  say(`signed by ${signing.signer}`);
+  say(`kept as ${approvalLabel(commit, branch)}`);
+  say(`it counts for ${approval.maxAgeHours} hours, for this commit and this branch only`);
+
+  // 7. When the policy says records and approvals travel, it goes to the remote now. The
+  //    approval stands either way: it is signed and kept.
+  const sending = policy.travel === true ? sendOn(root, subject) : undefined;
+  say(sending?.line ?? `it stays in this clone. To let another clone or CI see it: gotreceipts send ${shortCommit}`);
+
+  io.out(`VERDICT: APPROVED (commit ${shortCommit} into "${branch}", by ${signing.signer})`);
+  if (sending?.notSent !== undefined) {
+    io.out(`It is signed and kept, and other clones and CI cannot see it yet. Send it: gotreceipts send ${shortCommit}`);
+  }
+  return EXIT.PASS;
 }

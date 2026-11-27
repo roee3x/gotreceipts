@@ -1,5 +1,4 @@
-import { hoursSince, isInTheFuture, shownAge } from '../clock.ts';
-import { shortId } from '../git.ts';
+import { hoursSince, isInTheFuture } from '../clock.ts';
 import type { PolicySource } from '../policy/committed.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
 import { checkSignature } from './ssh.ts';
@@ -38,8 +37,7 @@ function reasonsFor(policy: Policy, branch: string, source: PolicySource): strin
 /**
  * Decides whether a commit needs an approval to enter a branch, and whether it has a valid one.
  *
- * Like the question about the record, this is asked in one place. The verify command, the push
- * hook and the merge command all ask it here, so they can never disagree.
+ * This is step 4 of the one question, and it is asked through the door only (door/judge.ts).
  *
  * `policy` and `source` are the policy the commit is judged by: the one on the target branch.
  * So the keys that count are the ones listed there. A commit cannot name its own signer.
@@ -57,55 +55,29 @@ export function judgeApproval(
   // A branch can only ask for an approval when a signer is listed (the reader of the policy
   // sees to that), so without one the only reason left is a protected file.
   if (policy.approval === undefined) return { kind: 'not-locked' };
+  const { signers, maxAgeHours } = policy.approval;
 
   const files = readApprovalFiles(root, commit, branch);
   if (files === undefined) return { kind: 'refused', reasons, detail: `there is no approval of this commit for "${branch}"` };
   const doesNotCount = (why: string): ApprovalDecision => ({ kind: 'refused', reasons, detail: `the approval that is there does not count: ${why}` });
 
   // The signature first. Until it is checked, nothing the file says is believed.
-  const signature = checkSignature(policy.approval.signers, files.statement, files.signatureFile);
+  const signature = checkSignature(signers, files.statement, files.signatureFile);
   if (signature.kind === 'cannot-check') return { kind: 'cannot-check', reasons, reason: signature.reason };
   if (signature.kind === 'bad') return doesNotCount(signature.reason);
 
+  // Then what was signed: this commit, into this branch.
   const parsed = parseApproval(files.statement.toString('utf8'));
   if (!parsed.ok) return doesNotCount(parsed.error);
   const { approval } = parsed;
   if (approval.commit !== commit) return doesNotCount('it approves another commit');
   if (approval.branch !== branch) return doesNotCount('it approves another branch');
 
+  // And when. An approval counts for as long as the policy says, and not before it was given.
   const approvedAt = Date.parse(approval.approvedAt);
   if (isInTheFuture(approvedAt, now)) return doesNotCount('it is dated in the future');
   const ageHours = hoursSince(approvedAt, now);
-  if (ageHours > policy.approval.maxAgeHours) {
-    return doesNotCount(`it is older than the ${policy.approval.maxAgeHours} hours an approval counts for`);
-  }
+  if (ageHours > maxAgeHours) return doesNotCount(`it is older than the ${maxAgeHours} hours an approval counts for`);
+
   return { kind: 'approved', reasons, signer: signature.signer, ageHours };
-}
-
-/** The lines every command prints about the approval. None, when the commit needs no approval. */
-export function approvalLines(decision: ApprovalDecision): string[] {
-  switch (decision.kind) {
-    case 'not-needed':
-      return [];
-    case 'not-locked':
-      return ['approval: not asked for. The policy lists no signer, so a change to a protected file needs nobody\'s signature'];
-    case 'approved':
-      return [needed(decision.reasons), `approved by ${decision.signer}, ${shownAge(decision.ageHours)} hours ago`];
-    case 'refused':
-      return [needed(decision.reasons), decision.detail];
-    case 'cannot-check':
-      return [needed(decision.reasons), `the approval could not be checked: ${decision.reason}`];
-  }
-}
-
-function needed(reasons: readonly string[]): string {
-  return `approval: needed, because ${reasons.join(', and ')}`;
-}
-
-/** What to do about a missing approval. The agent cannot do it, and the wording says so. */
-export function approvalAdvice(commit: string, branch: string): string[] {
-  return [
-    'An approval is the signature of an owner. They give it in their own terminal:',
-    `  gotreceipts approve ${shortId(commit)} --for ${branch}`,
-  ];
 }

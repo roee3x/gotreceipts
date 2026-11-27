@@ -1,12 +1,11 @@
-import { approvalAdvice, approvalLines, judgeApproval, type ApprovalDecision } from '../approval/judge.ts';
-import { shownAge } from '../clock.ts';
+import { proofOf, rulesFor } from '../door/judge.ts';
+import { approvalAdvice, approvalLines, approvalNotChecked, policyLines, recordButNoApproval, recordLines } from '../door/report.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { chooseLevel, targetBranch } from '../gate/command.ts';
 import { currentBranch, repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
 import { commitAskedFor, readOptions } from '../options.ts';
-import { knownTarget, policyFor, sourceLines } from '../policy/committed.ts';
-import { judgeCommit } from './judge.ts';
+import { knownTarget } from '../policy/committed.ts';
+import { chooseLevel, targetBranch } from '../policy/level.ts';
 
 export const VERIFY_USAGE = [
   'Usage: gotreceipts verify [commit] [options]',
@@ -53,55 +52,44 @@ export async function verifyCommand(args: readonly string[], io: Io): Promise<Ex
   if (!asked.ok) return cannotRun(asked.reason);
   const { commit } = asked;
 
-  // The policy: the one on the branch the commit wants to enter, not the commit's own copy.
-  const branch = currentBranch(root);
-  const target = targetBranch(options, branch);
-  const picked = policyFor(root, commit, target === undefined ? undefined : knownTarget(root, target));
-  if (!picked.ok) return cannotRun(...picked.errors);
-  const { policy } = picked;
+  // The question. The branch is found the way this clone last saw it: "verify" works without a network.
+  const checkedOut = currentBranch(root);
+  const branch = targetBranch(options, checkedOut);
+  const rules = rulesFor(root, commit, branch === undefined ? undefined : knownTarget(root, branch));
+  if (!rules.ok) return cannotRun(...rules.errors);
 
-  const chosen = chooseLevel(policy, options, branch);
+  const chosen = chooseLevel(rules.policy, options, checkedOut);
   if ('error' in chosen) return cannotRun(chosen.error);
+  const { level } = chosen;
 
-  const { decision, unreadable } = judgeCommit(root, policy, commit, chosen.level, Date.now());
+  const proof = proofOf(root, rules, { commit, level, branch, now: Date.now() });
+  const { record, approval } = proof;
 
+  // The answer, in the order of the question: the policy, the record, the approval.
   const shortCommit = shortId(commit);
-  io.out(`gotreceipts verify: commit ${shortCommit} needs level ${chosen.level}`);
-  const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
-  io.out(`  policy: ${policyLine}`);
-  for (const note of policyNotes) io.out(`  ${note}`);
-  for (const file of unreadable) {
-    io.out(`  ignored, not a valid record: ${file}`);
-  }
+  io.out(`gotreceipts verify: commit ${shortCommit} needs level ${level}`);
+  for (const line of [...policyLines(rules.source), ...recordLines(proof), ...approvalLines(approval)]) io.out(`  ${line}`);
 
-  if (decision.ok) {
-    io.out(`  ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago, under the current policy`);
-  } else {
-    for (const detail of decision.details) io.out(`  ${detail}`);
-  }
+  const lacksApproval = approval.kind === 'refused' && branch !== undefined;
+  const advice = lacksApproval ? approvalAdvice({ commit, branch }) : [];
 
-  // The approval. It is a question about entering a branch, so it is only asked when one is named.
-  const approval: ApprovalDecision =
-    target === undefined ? { kind: 'not-needed' } : judgeApproval(root, policy, picked.source, commit, target, Date.now());
-  for (const line of approvalLines(approval)) io.out(`  ${line}`);
-
-  if (!decision.ok) {
-    io.out(`VERDICT: REFUSED (${decision.summary})`);
-    if (approval.kind === 'refused' && target !== undefined) for (const line of approvalAdvice(commit, target)) io.out(line);
+  if (!record.ok) {
+    io.out(`VERDICT: REFUSED (${record.summary})`);
+    for (const line of advice) io.out(line);
     // The advice repeats how the level was asked for, so the gate reads the same policy as this did.
     // It is the last line: the record is what the reader can make themselves.
     const how = options.level !== undefined ? ` --level ${options.level}` : options.for !== undefined ? ` --for ${options.for}` : '';
     io.out(`To make a record: gotreceipts gate${how}`);
     return EXIT.REFUSED;
   }
-  if (approval.kind === 'cannot-check') return cannotRun(`the approval could not be checked: ${approval.reason}`);
-  if (approval.kind === 'refused' && target !== undefined) {
-    io.out(`VERDICT: REFUSED (commit ${shortCommit} has its record, and no valid approval for "${target}")`);
-    for (const line of approvalAdvice(commit, target)) io.out(line);
+  if (approval.kind === 'cannot-check') return cannotRun(approvalNotChecked(approval.reason));
+  if (lacksApproval) {
+    io.out(`VERDICT: REFUSED (${recordButNoApproval(commit, branch)})`);
+    for (const line of advice) io.out(line);
     return EXIT.REFUSED;
   }
 
-  const approved = approval.kind === 'approved' && target !== undefined ? `, and is approved for "${target}"` : '';
-  io.out(`VERDICT: PASS (commit ${shortCommit} satisfies level ${chosen.level}${approved})`);
+  const approved = approval.kind === 'approved' && branch !== undefined ? `, and is approved for "${branch}"` : '';
+  io.out(`VERDICT: PASS (commit ${shortCommit} satisfies level ${level}${approved})`);
   return EXIT.PASS;
 }
