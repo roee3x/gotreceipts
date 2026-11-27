@@ -4,7 +4,7 @@ import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { branchRef, headCommit, mergedTree, obtainCommit, repoRoot, shortId, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
 import { readOptions } from '../options.ts';
-import { countOf } from '../travel/receipts.ts';
+import { countOf } from '../travel/receipt.ts';
 import { fetchReceipts, sendReceipts } from '../travel/remote.ts';
 import { MERGE_METHODS, mergeCommitOf, mergePullRequest, type MergeMethod, type PullRequest } from './github.ts';
 import { pullRequestNow, pullRequestNumber, targetOf, whyNotOpen } from './target.ts';

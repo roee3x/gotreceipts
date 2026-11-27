@@ -5,7 +5,7 @@ import { BRANCH_PREFIX, hasCommit, headCommit, isFullId, isNoCommit, repoRoot, s
 import type { Io } from '../main.ts';
 import { policyFor, type PolicyChoice, type PolicySource } from '../policy/committed.ts';
 import type { Policy } from '../policy/policy.ts';
-import { countOf } from '../travel/receipts.ts';
+import { countOf } from '../travel/receipt.ts';
 import { sendReceipts } from '../travel/remote.ts';
 
 /**

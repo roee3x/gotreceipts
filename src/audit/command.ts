@@ -1,11 +1,14 @@
+import { notCounting, type ApprovalDecision } from '../approval/judge.ts';
 import { shownAge } from '../clock.ts';
 import { proofOf, rulesFor } from '../door/judge.ts';
+import { approvalNotChecked } from '../door/report.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { isNoCommit, remoteBranch, repoRoot, resolveCommit, shortId, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
 import { readOptions } from '../options.ts';
 import { protectedLine } from '../policy/committed.ts';
 import { fetchReceipts, pickRemote } from '../travel/remote.ts';
+import { detailOf, type Decision } from '../verify/decide.ts';
 import { commitTime, entriesOf, isShallow, ownLine, type Entry } from './entries.ts';
 
 export const AUDIT_USAGE = [
@@ -45,17 +48,136 @@ export const AUDIT_USAGE = [
   'Exit codes: 0 = every entry had what was asked, 1 = at least one had not, 2 = it could not be checked.',
 ].join('\n');
 
+// --- judging one entry ---
+
+/** "ok": it had what was asked. "lacking": it had not. "unchecked": it could not be found out, which is never a pass. */
 type Outcome = 'ok' | 'lacking' | 'unchecked';
 
+/** What was found out about an entry, or about one of the things asked of it: the outcome, and the lines that say it. */
 interface Judged {
   readonly outcome: Outcome;
   readonly lines: readonly string[];
 }
 
-/** In an audit, "now" is the time of the entry. So "in the future" means: made after the commit was already in. */
-function asOfEntry(text: string): string {
-  return text.replace('it is dated in the future', 'it was made after the commit had already entered the branch');
+const NOTHING_TO_SAY: Judged = { outcome: 'ok', lines: [] };
+
+function notChecked(reason: string): string {
+  return `could not be checked: ${reason}`;
 }
+
+/**
+ * Puts the parts of a judgement together, in their order. A part that could not be checked
+ * ends it: the entry is then not checked, whatever the other parts say.
+ */
+function together(parts: readonly Judged[]): Judged {
+  const lines: string[] = [];
+  let outcome: Outcome = 'ok';
+  for (const part of parts) {
+    lines.push(...part.lines);
+    if (part.outcome === 'unchecked') return { outcome: 'unchecked', lines };
+    if (part.outcome === 'lacking') outcome = 'lacking';
+  }
+  return { outcome, lines };
+}
+
+/**
+ * The doors ask their question as of now. The audit asks it as of the time the commit entered.
+ * So what a door calls "dated in the future" is here: made after the commit was already in.
+ * The audit says that in its own sentence, picked by the reason's code.
+ */
+const MADE_TOO_LATE = 'it was made after the commit had already entered the branch';
+
+/** For a merge: whether the result holds exactly the files of the commit that was merged in. */
+function resultFound(root: string, entry: Entry): Judged {
+  if (entry.kind !== 'merge') return NOTHING_TO_SAY;
+  const result = treeOf(root, entry.on);
+  const tested = treeOf(root, entry.entered);
+  if (result === undefined || tested === undefined) {
+    return { outcome: 'unchecked', lines: [notChecked('git could not read the files of the merge')] };
+  }
+  if (result === tested) return NOTHING_TO_SAY;
+  return {
+    outcome: 'lacking',
+    lines: [`result: NOT WHAT WAS TESTED. The merge holds files that are not the same as in commit ${shortId(entry.entered)}`],
+  };
+}
+
+function recordFound(record: Decision, level: string): Judged {
+  if (record.ok) {
+    return { outcome: 'ok', lines: [`record: ${record.record.level} record, passed ${shownAge(record.ageHours)} hours before, as level ${level} asked`] };
+  }
+  const details = record.looked.map(({ about, problem, sentence }) => detailOf({ about, sentence: problem === 'from-the-future' ? MADE_TOO_LATE : sentence }));
+  return {
+    outcome: 'lacking',
+    lines: [`record: NONE THAT COUNTS for level ${level} (${record.summary})`, ...details.map((detail) => `  ${detail}`)],
+  };
+}
+
+function approvalFound(approval: ApprovalDecision): Judged {
+  switch (approval.kind) {
+    case 'not-needed':
+      return NOTHING_TO_SAY;
+    case 'not-locked':
+      return {
+        outcome: 'ok',
+        lines: ['approval: not asked for. That policy listed no signer, so a change to a protected file needed nobody\'s signature'],
+      };
+    case 'approved':
+      return {
+        outcome: 'ok',
+        lines: [`approval: by ${approval.signer}, ${shownAge(approval.ageHours)} hours before. Needed because ${approval.reasons.join(', and ')}`],
+      };
+    case 'refused': {
+      const why = approval.problem === 'from-the-future' ? notCounting(MADE_TOO_LATE) : approval.detail;
+      return { outcome: 'lacking', lines: [`approval: NONE THAT COUNTS (${why}). Needed because ${approval.reasons.join(', and ')}`] };
+    }
+    case 'cannot-check':
+      return { outcome: 'unchecked', lines: [notChecked(approvalNotChecked(approval.reason))] };
+  }
+}
+
+/** Judges one entry. It reads the remote and the repository, and prints nothing. */
+function judgeEntry(root: string, remote: string, branch: string, entry: Entry): Judged {
+  const ok = (...lines: readonly string[]): Judged => ({ outcome: 'ok', lines });
+
+  if (entry.before === undefined) return ok('the history of the branch starts here. Nothing was there to ask');
+  if (entry.kind === 'many-parents') {
+    return {
+      outcome: 'lacking',
+      lines: ['more than two lines of history meet in this commit, so which commit had to bring its record cannot be told'],
+    };
+  }
+
+  // 1. The rules: the policy the branch held just before. What the entry itself did to the policy file does not count.
+  const shown = `"${branch}" before`;
+  const rules = rulesFor(root, entry.on, { branch, commit: entry.before, shown });
+  if (!rules.ok) return { outcome: 'unchecked', lines: rules.errors.map(notChecked) };
+  const { source, tier } = rules;
+  if (source.kind === 'own') return ok(`"${branch}" held no policy before this, so nothing was asked`);
+  const policyLine = `policy: the one "${branch}" held before, at commit ${shortId(entry.before)}`;
+  if (tier === undefined) return ok(policyLine, `that policy set no level for "${branch}", so nothing was asked`);
+  const asked = ok(policyLine, ...(source.protectedChanged.length > 0 ? [protectedLine(source.protectedChanged, shown)] : []));
+  const unchecked = (reason: string): Judged => together([asked, { outcome: 'unchecked', lines: [notChecked(reason)] }]);
+
+  // 2. The time the question is asked for: when the commit entered.
+  const when = commitTime(root, entry.on);
+  if (when === undefined) return unchecked(`git could not say when commit ${shortId(entry.on)} was made`);
+
+  // 3. What the remote holds for the commit that entered. Nothing is believed because it is
+  //    there: the record and the approval are judged like any other.
+  const got = fetchReceipts(root, remote, entry.entered, Date.now());
+  if (got.kind === 'error') {
+    return unchecked(`${remote} could not be asked for the record of commit ${shortId(entry.entered)}: ${got.reason}`);
+  }
+
+  // 4. The same question the doors ask, about the commit that entered, as of the time it entered.
+  const proof = proofOf(root, rules, { commit: entry.entered, level: tier.level, branch, now: when });
+  return together([asked, resultFound(root, entry), recordFound(proof.record, tier.level), approvalFound(proof.approval)]);
+}
+
+// --- the report ---
+
+const MARK: Record<Outcome, string> = { ok: 'OK', lacking: 'NOT AS ASKED', unchecked: 'NOT CHECKED' };
 
 function headline(entry: Entry): string {
   const on = shortId(entry.on);
@@ -64,99 +186,29 @@ function headline(entry: Entry): string {
   return `${on} pushed straight onto the branch (${entry.commits === 1 ? '1 commit' : `${entry.commits} commits`})`;
 }
 
-/** Judges one entry. It reads the remote and the repository, and prints nothing. */
-function judgeEntry(root: string, remote: string, branch: string, entry: Entry): Judged {
-  const lines: string[] = [];
-  const done = (outcome: Outcome): Judged => ({ outcome, lines });
+/** The verdict over all entries. One that could not be checked outweighs one that had not what was asked. */
+function verdict(io: Io, branch: string, count: Readonly<Record<Outcome, number>>): ExitCode {
+  const total = count.ok + count.lacking + count.unchecked;
+  const of = (n: number): string => (total === 1 ? 'the entry' : `${n} of ${total} entries`);
 
-  if (entry.before === undefined) {
-    lines.push('the history of the branch starts here. Nothing was there to ask');
-    return done('ok');
+  if (count.unchecked > 0) {
+    io.out(`VERDICT: NOT CHECKED (${of(count.unchecked)} into "${branch}" could not be checked). That is never a pass.`);
+    return EXIT.CANNOT_RUN;
   }
-  if (entry.kind === 'many-parents') {
-    lines.push('more than two lines of history meet in this commit, so which commit had to bring its record cannot be told');
-    return done('lacking');
+  if (count.lacking > 0) {
+    io.out(`VERDICT: FAIL (${of(count.lacking)} into "${branch}" had not what the policy asked for)`);
+    io.out('What entered is already on the branch. A record or an approval that is made now does not count:');
+    io.out('it is not what opened the door. One that was made in time and never sent still does:');
+    io.out('gotreceipts send <commit>, in the clone that holds it. Then run the audit again.');
+    return EXIT.REFUSED;
   }
-
-  // The policy the branch held just before. What the entry itself did to the policy file does not count.
-  const shown = `"${branch}" before`;
-  const rules = rulesFor(root, entry.on, { branch, commit: entry.before, shown });
-  if (!rules.ok) {
-    for (const error of rules.errors) lines.push(`could not be checked: ${error}`);
-    return done('unchecked');
-  }
-  const { source, tier } = rules;
-  if (source.kind === 'own') {
-    lines.push(`"${branch}" held no policy before this, so nothing was asked`);
-    return done('ok');
-  }
-  lines.push(`policy: the one "${branch}" held before, at commit ${shortId(entry.before)}`);
-  if (tier === undefined) {
-    lines.push(`that policy set no level for "${branch}", so nothing was asked`);
-    return done('ok');
-  }
-  if (source.protectedChanged.length > 0) lines.push(protectedLine(source.protectedChanged, shown));
-
-  const when = commitTime(root, entry.on);
-  if (when === undefined) {
-    lines.push(`could not be checked: git could not say when commit ${shortId(entry.on)} was made`);
-    return done('unchecked');
-  }
-
-  // What the remote holds for the commit that entered. Nothing is believed because it is there:
-  // the record and the approval are judged below like any other.
-  const got = fetchReceipts(root, remote, entry.entered, Date.now());
-  if (got.kind === 'error') {
-    lines.push(`could not be checked: ${remote} could not be asked for the record of commit ${shortId(entry.entered)}: ${got.reason}`);
-    return done('unchecked');
-  }
-
-  let outcome: Outcome = 'ok';
-
-  if (entry.kind === 'merge') {
-    const result = treeOf(root, entry.on);
-    const tested = treeOf(root, entry.entered);
-    if (result === undefined || tested === undefined) {
-      lines.push('could not be checked: git could not read the files of the merge');
-      return done('unchecked');
-    }
-    if (result !== tested) {
-      lines.push(`result: NOT WHAT WAS TESTED. The merge holds files that are not the same as in commit ${shortId(entry.entered)}`);
-      outcome = 'lacking';
-    }
-  }
-
-  // The same question the doors ask, about the commit that entered, as of the time it entered.
-  const { record: decision, approval } = proofOf(root, rules, { commit: entry.entered, level: tier.level, branch, now: when });
-  if (decision.ok) {
-    lines.push(`record: ${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours before, as level ${tier.level} asked`);
-  } else {
-    lines.push(`record: NONE THAT COUNTS for level ${tier.level} (${asOfEntry(decision.summary)})`);
-    for (const detail of decision.details) lines.push(`  ${asOfEntry(detail)}`);
-    outcome = 'lacking';
-  }
-
-  switch (approval.kind) {
-    case 'not-needed':
-      break;
-    case 'not-locked':
-      lines.push('approval: not asked for. That policy listed no signer, so a change to a protected file needed nobody\'s signature');
-      break;
-    case 'approved':
-      lines.push(`approval: by ${approval.signer}, ${shownAge(approval.ageHours)} hours before. Needed because ${approval.reasons.join(', and ')}`);
-      break;
-    case 'refused':
-      lines.push(`approval: NONE THAT COUNTS (${asOfEntry(approval.detail)}). Needed because ${approval.reasons.join(', and ')}`);
-      outcome = 'lacking';
-      break;
-    case 'cannot-check':
-      lines.push(`could not be checked: the approval could not be checked: ${approval.reason}`);
-      return done('unchecked');
-  }
-  return done(outcome);
+  io.out(
+    total === 1
+      ? `VERDICT: PASS (the entry into "${branch}" had what the policy asked for)`
+      : `VERDICT: PASS (${total} entries into "${branch}", each with what the policy asked for)`,
+  );
+  return EXIT.PASS;
 }
-
-const MARK: Record<Outcome, string> = { ok: 'OK', lacking: 'NOT AS ASKED', unchecked: 'NOT CHECKED' };
 
 export async function auditCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   const start = readOptions({ command: 'audit', usage: AUDIT_USAGE, values: ['since', 'remote'], positionals: true }, args, io);
@@ -180,21 +232,20 @@ export async function auditCommand(args: readonly string[], io: Io): Promise<Exi
   if (!picked.ok) return cannotRun(picked.reason);
   const remote = picked.name;
 
-  // The branch as the remote has it now, asked from the remote itself.
+  // 1. The branch as the remote has it now, asked from the remote itself.
   const onRemote = remoteBranch(root, remote, branch);
   if (onRemote.kind === 'unknown') return cannotRun(`the remote "${remote}" holds no branch "${branch}", or did not answer`);
   if (onRemote.kind === 'not-downloaded') return cannotRun(`the newest commit of "${branch}" could not be downloaded`);
   const tip = onRemote.commit;
 
+  // 2. What entered it, oldest first: the order in which it entered.
   let since: string | undefined;
   if (options.since !== undefined && !isNoCommit(options.since)) {
     since = resolveCommit(root, options.since);
     if (since === undefined) return cannotRun(`there is no commit "${options.since}"`);
   }
-
   const line = ownLine(root, tip, since);
   if (!line.ok) return cannotRun(line.reason);
-  // Oldest first: the order in which they entered.
   const entries = entriesOf(line.steps).reverse();
 
   io.out(
@@ -207,6 +258,7 @@ export async function auditCommand(args: readonly string[], io: Io): Promise<Exi
     return EXIT.PASS;
   }
 
+  // 3. Each entry, judged and then printed.
   const count: Record<Outcome, number> = { ok: 0, lacking: 0, unchecked: 0 };
   for (const entry of entries) {
     const judged = judgeEntry(root, remote, branch, entry);
@@ -214,24 +266,5 @@ export async function auditCommand(args: readonly string[], io: Io): Promise<Exi
     io.out(`  ${headline(entry)}: ${MARK[judged.outcome]}`);
     for (const each of judged.lines) io.out(`      ${each}`);
   }
-
-  const total = entries.length;
-  const of = (n: number): string => (total === 1 ? 'the entry' : `${n} of ${total} entries`);
-  if (count.unchecked > 0) {
-    io.out(`VERDICT: NOT CHECKED (${of(count.unchecked)} into "${branch}" could not be checked). That is never a pass.`);
-    return EXIT.CANNOT_RUN;
-  }
-  if (count.lacking > 0) {
-    io.out(`VERDICT: FAIL (${of(count.lacking)} into "${branch}" had not what the policy asked for)`);
-    io.out('What entered is already on the branch. A record or an approval that is made now does not count:');
-    io.out('it is not what opened the door. One that was made in time and never sent still does:');
-    io.out('gotreceipts send <commit>, in the clone that holds it. Then run the audit again.');
-    return EXIT.REFUSED;
-  }
-  io.out(
-    total === 1
-      ? `VERDICT: PASS (the entry into "${branch}" had what the policy asked for)`
-      : `VERDICT: PASS (${total} entries into "${branch}", each with what the policy asked for)`,
-  );
-  return EXIT.PASS;
+  return verdict(io, branch, count);
 }

@@ -1,23 +1,17 @@
 import { git, obtainCommit, remoteRefCommit, remotes } from '../git.ts';
-import {
-  filesOfCommit,
-  keepReceipts,
-  localReceipts,
-  mergeReceipts,
-  notFromTheFuture,
-  receiptsRef,
-  sortIntoReceipts,
-  writeCommit,
-  type Receipt,
-} from './receipts.ts';
+import { keepReceipts, localReceipts } from './local.ts';
+import { filesOfCommit, writeCommit } from './objects.ts';
+import { mergeReceipts, notFromTheFuture, receiptsRef, sortIntoReceipts, type Receipt } from './receipt.ts';
 
 /**
  * The remote side of records and approvals that travel: asking a remote what it holds for one
  * commit, adding to it, and taking from it.
  */
 
+type Remote = { readonly ok: true; readonly name: string } | { readonly ok: false; readonly reason: string };
+
 /** The remote to use when none is named: "origin", or the only one there is. */
-export function pickRemote(root: string, named: string | undefined): { readonly ok: true; readonly name: string } | { readonly ok: false; readonly reason: string } {
+export function pickRemote(root: string, named: string | undefined): Remote {
   const all = remotes(root).map((remote) => remote.name);
   if (named !== undefined) {
     return all.includes(named) ? { ok: true, name: named } : { ok: false, reason: `this repository has no remote "${named}"` };
@@ -28,6 +22,7 @@ export function pickRemote(root: string, named: string | undefined): { readonly 
   return { ok: false, reason: `say which remote, with --remote (this repository has: ${all.join(', ')})` };
 }
 
+/** The first line of what git said that is not empty. */
 function firstLine(text: string): string {
   return (
     text
@@ -49,17 +44,19 @@ export type Held =
  * name is not looked at.
  */
 export function remoteReceipts(root: string, remote: string, commit: string, now: number): Held {
+  const error = (reason: string): Held => ({ kind: 'error', reason });
   const ref = receiptsRef(commit);
+
   const asked = remoteRefCommit(root, remote, ref);
-  if (!asked.ok) return { kind: 'error', reason: firstLine(asked.stderr) || `the remote "${remote}" did not answer` };
+  if (!asked.ok) return error(firstLine(asked.stderr) || `the remote "${remote}" did not answer`);
   const receiptsCommit = asked.commit;
   if (receiptsCommit === undefined) return { kind: 'none' };
 
   if (!obtainCommit(root, remote, ref, receiptsCommit)) {
-    return { kind: 'error', reason: `what the remote "${remote}" holds for this commit could not be downloaded` };
+    return error(`what the remote "${remote}" holds for this commit could not be downloaded`);
   }
   const files = filesOfCommit(root, receiptsCommit);
-  if (files === undefined) return { kind: 'error', reason: `what the remote "${remote}" holds for this commit could not be read` };
+  if (files === undefined) return error(`what the remote "${remote}" holds for this commit could not be read`);
   return { kind: 'found', receiptsCommit, receipts: notFromTheFuture(sortIntoReceipts(commit, files), now) };
 }
 
@@ -73,6 +70,8 @@ export type Sent =
 
 /** How often the sending starts over when someone else sent in the same moment. */
 const ATTEMPTS = 3;
+/** What git says when a push is refused because the remote moved in between. Only that is worth another try. */
+const REMOTE_MOVED = /fetch first|non-fast-forward|stale info/;
 
 /**
  * Sends what this clone holds for one commit to the remote.
@@ -101,8 +100,7 @@ export function sendReceipts(root: string, remote: string, commit: string, now: 
     const pushed = git(['push', '--quiet', '--no-verify', remote, `${made}:${receiptsRef(commit)}`], root);
     if (pushed.ok) return { kind: 'sent', sent: merged.gained, held: merged.all };
     lastError = firstLine(pushed.stderr.replace(/^To .*$/m, '')) || 'the push was refused';
-    // Only "the remote moved in between" is worth another try. Any other refusal is final.
-    if (!/fetch first|non-fast-forward|stale info/.test(pushed.stderr)) break;
+    if (!REMOTE_MOVED.test(pushed.stderr)) break;
   }
   return { kind: 'error', reason: lastError };
 }
