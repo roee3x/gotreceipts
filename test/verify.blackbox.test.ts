@@ -5,7 +5,7 @@ import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { gitIn, head, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
 
 /** G0 holds one check that can be made to fail from outside. G1 adds a check that always passes. */
 const POLICY = {
@@ -21,10 +21,6 @@ const POLICY = {
 };
 
 const FAIL = { GOTRECEIPTS_TEST_FAIL: '1' };
-
-function head(repo: string): string {
-  return gitIn(repo, 'rev-parse', 'HEAD').stdout.trim();
-}
 
 function recordPath(repo: string, commit: string, level: string): string {
   return join(repo, '.git', 'gotreceipts', 'records', commit, `${level}.json`);

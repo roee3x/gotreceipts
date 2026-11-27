@@ -1,3 +1,6 @@
+// The one pure step of the audit: cutting the branch's own line of commits into entries.
+// An entry is one thing that moved the branch: a merge, or a push of one or more commits.
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 

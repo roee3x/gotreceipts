@@ -4,31 +4,30 @@
 // another, fresh one, the way a CI machine would: it holds the history and nothing else.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 
-import { addRemote, gitIn, installPushHook, lastLine, runCli, tempRepo, testKey, writeIn, type RunResult, type TestKey } from './helpers/temp-repo.ts';
+import { commitFile, gate, ownerPolicy, served } from './helpers/scene.ts';
+import {
+  addRemote,
+  cloneOf,
+  gitIn,
+  gitInEnv,
+  head,
+  installPushHook,
+  lastLine,
+  runCli,
+  tempRepo,
+  testKey,
+  type RunResult,
+  type TestKey,
+} from './helpers/temp-repo.ts';
 
 /**
- * develop needs a record. main also asks for an approval of every commit. The folder of the
- * checks is protected. One signer, "owner". Records and approvals travel.
+ * The shared policy with an owner: develop needs a record, and main also asks for an approval
+ * of every commit. Here the folder of the checks is protected, and records and approvals travel.
  */
 function policyFor(owner: TestKey): Record<string, unknown> {
-  return {
-    schema: 1,
-    levels: [{ name: 'G0', checks: [{ name: 'build', run: 'node checks/pass.js' }] }],
-    tiers: [
-      { branch: 'feature/*', level: 'G0' },
-      { branch: 'develop', level: 'G0' },
-      { branch: 'main', level: 'G0', needsApproval: true },
-    ],
-    protected: ['checks'],
-    approval: { signers: [{ name: 'owner', key: owner.publicKey }] },
-    travel: true,
-  };
+  return ownerPolicy(owner, { protected: ['checks'], travel: true });
 }
 
 interface Scene {
@@ -40,31 +39,15 @@ interface Scene {
   readonly base: string;
 }
 
-function rev(repo: string, name: string): string {
-  return gitIn(repo, 'rev-parse', name).stdout.trim();
-}
-
 function scene(t: TestContext): Scene {
   const owner = testKey(t);
-  const work = tempRepo(t, { policy: policyFor(owner) });
-  const remote = addRemote(t, work);
-  assert.equal(gitIn(work, 'push', '--quiet', 'origin', 'feature/thing:main', 'feature/thing:develop').status, 0);
-  assert.equal(gitIn(work, 'fetch', '--quiet', 'origin').status, 0);
-  return { work, remote, owner, base: rev(work, 'HEAD') };
-}
-
-/** Commits one changed file on the branch that is checked out, and returns the commit. */
-function change(repo: string, path: string, content: string): string {
-  writeIn(repo, path, content);
-  assert.equal(gitIn(repo, 'add', '--all').status, 0);
-  assert.equal(gitIn(repo, 'commit', '--quiet', '-m', `test: change ${path}`).status, 0);
-  return rev(repo, 'HEAD');
+  const { repo, remote, base } = served(t, policyFor(owner));
+  return { work: repo, remote, owner, base };
 }
 
 /** Runs the gate on the commit that is checked out, and sends its record to the remote. */
 function gateAndSend(repo: string): void {
-  const gate = runCli(repo, ['gate', '--level', 'G0']);
-  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
+  gate(repo);
   const sent = runCli(repo, ['send']);
   assert.equal(sent.status, 0, sent.stdout + sent.stderr);
 }
@@ -75,21 +58,11 @@ function gateAndSend(repo: string): void {
  */
 function mergeInto(s: Scene, branch: string, commit: string, when?: Date): string {
   const date = when?.toISOString();
+  const dated = date === undefined ? {} : { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date };
   assert.equal(gitIn(s.work, 'switch', '--quiet', '--detach', `origin/${branch}`).status, 0);
-  const merged = spawnSync('git', ['-c', 'commit.gpgsign=false', 'merge', '--quiet', '--no-ff', '-m', 'test: a merge', commit], {
-    cwd: s.work,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Test Author',
-      GIT_AUTHOR_EMAIL: 'test@example.com',
-      GIT_COMMITTER_NAME: 'Test Author',
-      GIT_COMMITTER_EMAIL: 'test@example.com',
-      ...(date === undefined ? {} : { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }),
-    },
-  });
+  const merged = gitInEnv(s.work, dated, 'merge', '--quiet', '--no-ff', '-m', 'test: a merge', commit);
   assert.equal(merged.status, 0, merged.stderr);
-  const made = rev(s.work, 'HEAD');
+  const made = head(s.work);
   assert.equal(gitIn(s.work, 'push', '--quiet', 'origin', `HEAD:${branch}`).status, 0);
   assert.equal(gitIn(s.work, 'switch', '--quiet', 'feature/thing').status, 0);
   assert.equal(gitIn(s.work, 'fetch', '--quiet', 'origin').status, 0);
@@ -98,18 +71,14 @@ function mergeInto(s: Scene, branch: string, commit: string, when?: Date): strin
 
 /** Runs the audit in a fresh clone of the remote, as a CI machine would. */
 function audit(t: TestContext, s: Scene, args: string[], cloneArgs: string[] = []): RunResult {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-ci-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
-  const cloned = gitIn(tmpdir(), 'clone', '--quiet', '--branch', 'main', ...cloneArgs, s.remote, folder);
-  assert.equal(cloned.status, 0, cloned.stderr);
-  return runCli(folder, ['audit', ...args]);
+  return runCli(cloneOf(t, s.remote, ...cloneArgs), ['audit', ...args]);
 }
 
 // --- the central claim ---
 
 test('a merge that went through the doors passes the audit', (t) => {
   const s = scene(t);
-  const commit = change(s.work, 'data.txt', 'changed\n');
+  const commit = commitFile(s.work, 'data.txt', 'changed\n');
   gateAndSend(s.work);
   const merge = mergeInto(s, 'develop', commit);
 
@@ -125,7 +94,7 @@ test('a merge that went through the doors passes the audit', (t) => {
 
 test('a merge that went around the tool is named, and a record that was made in time and never sent can still be sent', (t) => {
   const s = scene(t);
-  const commit = change(s.work, 'data.txt', 'changed\n');
+  const commit = commitFile(s.work, 'data.txt', 'changed\n');
   assert.equal(runCli(s.work, ['gate', '--level', 'G0']).status, 0);
   // The record exists in the clone. Nobody sent it, and the merge did not go through the tool.
   const merge = mergeInto(s, 'develop', commit);
@@ -143,7 +112,7 @@ test('a merge that went around the tool is named, and a record that was made in 
 
 test('a record that is made after the commit was already in does not count', (t) => {
   const s = scene(t);
-  const commit = change(s.work, 'data.txt', 'changed\n');
+  const commit = commitFile(s.work, 'data.txt', 'changed\n');
   // The merge happened an hour ago, with no record. The gate is run only now.
   mergeInto(s, 'develop', commit, new Date(Date.now() - 3_600_000));
   gateAndSend(s.work);
@@ -160,12 +129,12 @@ test('into a branch that asks for an approval, an entry without a signature is n
   const s = scene(t);
 
   // The first commit has its record and no approval.
-  const first = change(s.work, 'data.txt', 'first\n');
+  const first = commitFile(s.work, 'data.txt', 'first\n');
   gateAndSend(s.work);
   const firstMerge = mergeInto(s, 'main', first);
 
   // The second one is approved. With "travel", the approval goes to the remote as it is signed.
-  const second = change(s.work, 'data.txt', 'second\n');
+  const second = commitFile(s.work, 'data.txt', 'second\n');
   assert.equal(runCli(s.work, ['gate', '--level', 'G0']).status, 0);
   const approved = runCli(s.work, ['approve', '--for', 'main', '--key', s.owner.file], {}, 'approve\n');
   assert.equal(approved.status, 0, approved.stdout + approved.stderr);
@@ -192,7 +161,7 @@ test('into a branch that asks for an approval, an entry without a signature is n
 
 test('a change to a protected file that entered without a signature is named, file by file', (t) => {
   const s = scene(t);
-  const commit = change(s.work, 'checks/pass.js', "console.log('a weaker check');\n");
+  const commit = commitFile(s.work, 'checks/pass.js', "console.log('a weaker check');\n");
   gateAndSend(s.work);
   mergeInto(s, 'develop', commit);
 
@@ -211,8 +180,8 @@ test('a change to a protected file that entered without a signature is named, fi
 test('a push through the hook leaves its record on the remote, and the audit finds it', (t) => {
   const s = scene(t);
   installPushHook(s.work);
-  change(s.work, 'data.txt', 'one\n');
-  const newest = change(s.work, 'data.txt', 'two\n');
+  commitFile(s.work, 'data.txt', 'one\n');
+  const newest = commitFile(s.work, 'data.txt', 'two\n');
   assert.equal(runCli(s.work, ['gate', '--level', 'G0']).status, 0);
 
   const pushed = gitIn(s.work, 'push', 'origin', 'feature/thing:develop');
@@ -226,7 +195,7 @@ test('a push through the hook leaves its record on the remote, and the audit fin
 
 test('a push that skipped the hook is named', (t) => {
   const s = scene(t);
-  const commit = change(s.work, 'data.txt', 'not gated\n');
+  const commit = commitFile(s.work, 'data.txt', 'not gated\n');
   assert.equal(gitIn(s.work, 'push', '--quiet', 'origin', 'feature/thing:develop').status, 0);
 
   const result = audit(t, s, ['develop', '--since', s.base]);
@@ -239,10 +208,10 @@ test('a push that skipped the hook is named', (t) => {
 test('a merge whose result is not the commit that was merged in is named', (t) => {
   const s = scene(t);
   // The commit that wants in is gated. Meanwhile the branch moves, and nobody gates the merged result.
-  const commit = change(s.work, 'data.txt', 'changed\n');
+  const commit = commitFile(s.work, 'data.txt', 'changed\n');
   gateAndSend(s.work);
   assert.equal(gitIn(s.work, 'switch', '--quiet', '--detach', 'origin/develop').status, 0);
-  const moved = change(s.work, 'other.txt', 'someone else got in first\n');
+  const moved = commitFile(s.work, 'other.txt', 'someone else got in first\n');
   assert.equal(runCli(s.work, ['gate', '--level', 'G0']).status, 0);
   assert.equal(runCli(s.work, ['send']).status, 0);
   assert.equal(gitIn(s.work, 'push', '--quiet', 'origin', 'HEAD:develop').status, 0);
@@ -265,9 +234,9 @@ test('before the branch held a policy, nothing was asked', (t) => {
   const work = tempRepo(t, {});
   const remote = addRemote(t, work);
   assert.equal(gitIn(work, 'push', '--quiet', 'origin', 'feature/thing:main').status, 0);
-  const base = rev(work, 'HEAD');
+  const base = head(work);
   const owner = testKey(t);
-  change(work, 'gotreceipts.json', `${JSON.stringify(policyFor(owner), null, 2)}\n`);
+  commitFile(work, 'gotreceipts.json', `${JSON.stringify(policyFor(owner), null, 2)}\n`);
   assert.equal(gitIn(work, 'push', '--quiet', 'origin', 'feature/thing:main').status, 0);
 
   const result = audit(t, { work, remote, owner, base }, ['main', '--since', base]);
@@ -277,9 +246,9 @@ test('before the branch held a policy, nothing was asked', (t) => {
 
 test('without "--since" only the last entry is looked at, and an id of zeros means the same', (t) => {
   const s = scene(t);
-  const first = change(s.work, 'data.txt', 'first\n');
+  const first = commitFile(s.work, 'data.txt', 'first\n');
   mergeInto(s, 'develop', first);
-  const second = change(s.work, 'data.txt', 'second\n');
+  const second = commitFile(s.work, 'data.txt', 'second\n');
   gateAndSend(s.work);
   const secondMerge = mergeInto(s, 'develop', second);
 
@@ -298,15 +267,13 @@ test('without "--since" only the last entry is looked at, and an id of zeros mea
 
 test('the audit cannot run on part of the history, or from a commit that is not on the branch', (t) => {
   const s = scene(t);
-  const commit = change(s.work, 'data.txt', 'changed\n');
+  const commit = commitFile(s.work, 'data.txt', 'changed\n');
   gateAndSend(s.work);
   mergeInto(s, 'develop', commit);
 
   // A clone with only the newest commit, as a CI checkout is unless it is told otherwise.
   const address = `file:///${s.remote.replace(/\\/g, '/').replace(/^\//, '')}`;
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-ci-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
-  assert.equal(gitIn(tmpdir(), 'clone', '--quiet', '--depth', '1', '--branch', 'develop', address, folder).status, 0);
+  const folder = cloneOf(t, address, '--depth', '1', '--branch', 'develop');
   const shallow = runCli(folder, ['audit', 'develop']);
   assert.equal(shallow.status, 2, shallow.stdout + shallow.stderr);
   assert.match(shallow.stderr, /CANNOT RUN: this clone holds only part of the history, so what entered the branch cannot be read/);

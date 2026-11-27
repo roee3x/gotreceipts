@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { gitIn, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { lastLine, runCli, shortHead, tempRepo, writeIn } from './helpers/temp-repo.ts';
 
 interface CheckSpec {
   name: string;
@@ -32,7 +32,7 @@ const FAIL: CheckSpec = { name: 'lint', run: 'node checks/fail.js' };
 
 test('every check passes: exit 0, each check is listed, and the last line is the verdict', (t) => {
   const repo = tempRepo(t, { policy: policy([PASS, { name: 'second', run: 'node checks/pass.js' }]) });
-  const head = gitIn(repo, 'rev-parse', '--short=7', 'HEAD').stdout.trim();
+  const head = shortHead(repo);
 
   const result = runCli(repo, ['gate']);
   assert.equal(result.status, 0, result.stdout + result.stderr);

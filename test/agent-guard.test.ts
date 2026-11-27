@@ -1,9 +1,13 @@
 // Which shell commands the agent hook stops, and which it lets through.
+// The tests come in the order of the three parts of the guard: a shell line cut into commands,
+// the rules, and what the agent is told.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { forbiddenCommand, guardMessage, splitCommands } from '../src/agent/guard.ts';
+
+// --- a shell line, cut into commands ---
 
 test('a shell line is split into commands and words, with quotes kept together', () => {
   assert.deepEqual(splitCommands('git status'), [['git', 'status']]);
@@ -20,6 +24,8 @@ test('a shell line is split into commands and words, with quotes kept together',
   assert.deepEqual(splitCommands('one \\\n two'), [['one', 'two']]);
   assert.deepEqual(splitCommands(''), []);
 });
+
+// --- the rules ---
 
 const MERGES = [
   'gh pr merge 5',
@@ -148,6 +154,8 @@ test('when in doubt it stops: the words of a merge outside quotes are enough', (
   // Nothing would be merged here. The hook cannot know that, and a refusal with a clear message costs little.
   assert.equal(forbiddenCommand('echo gh pr merge 5'), 'gh-pr-merge');
 });
+
+// --- what the agent is told ---
 
 test('the message names the command to use instead, and how to start the tool', () => {
   const merge = guardMessage('gh-pr-merge', 'node "/opt/tool/cli.js"');

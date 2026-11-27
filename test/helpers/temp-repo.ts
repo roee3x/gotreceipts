@@ -1,5 +1,9 @@
 // Shared by the outside-in tests: a small git repository in a temporary folder,
 // with a few tiny scripts that stand in for a project's real checks.
+//
+// This file is the base: making a folder, a repository, a remote and a clone, running git and
+// the tool, and looking at what git holds. The scenes that several test files start from are built on
+// it, in scene.ts.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -41,13 +45,44 @@ export interface RunResult {
   readonly stderr: string;
 }
 
-export function gitIn(cwd: string, ...args: string[]): RunResult {
+/** Runs git in `cwd`, with the fixed identity and with `extraEnv` on top of it. */
+export function gitInEnv(cwd: string, extraEnv: Record<string, string>, ...args: string[]): RunResult {
   const result = spawnSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args], {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV },
+    env: { ...process.env, ...GIT_ENV, ...extraEnv },
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+export function gitIn(cwd: string, ...args: string[]): RunResult {
+  return gitInEnv(cwd, {}, ...args);
+}
+
+/** The commit a name points to in `repo`: a branch, "origin/main", or any other name git knows. */
+export function commitAt(repo: string, name: string): string {
+  return gitIn(repo, 'rev-parse', name).stdout.trim();
+}
+
+/** The commit that is checked out in `repo`. */
+export function head(repo: string): string {
+  return commitAt(repo, 'HEAD');
+}
+
+/** The commit that is checked out in `repo`, the way the tool prints a commit: its first seven characters. */
+export function shortHead(repo: string): string {
+  return head(repo).slice(0, 7);
+}
+
+/**
+ * A folder of its own in the system's temporary place, removed when the test ends.
+ * `what` says what it is for, and becomes part of its name.
+ */
+export function tempFolder(t: TestContext, what: string): string {
+  const folder = mkdtempSync(join(tmpdir(), `gotreceipts-${what}-`));
+  // Windows sometimes holds a file for a moment after a program ended, so the removal tries again.
+  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  return folder;
 }
 
 export function writeIn(folder: string, relativePath: string, content: string): string {
@@ -71,8 +106,7 @@ export interface RepoOptions {
  * all committed, and removes it when the test ends.
  */
 export function tempRepo(t: TestContext, options: RepoOptions = {}): string {
-  const repo = mkdtempSync(join(tmpdir(), 'gotreceipts-test-'));
-  t.after(() => rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const repo = tempFolder(t, 'test');
 
   const branch = options.branch ?? 'feature/thing';
   const init = gitIn(repo, 'init', '--quiet', `--initial-branch=${branch}`);
@@ -112,11 +146,35 @@ export function runCli(cwd: string, args: string[], extraEnv: Record<string, str
  * and adds it to `repo` under the name "origin". Returns its folder.
  */
 export function addRemote(t: TestContext, repo: string): string {
-  const remote = mkdtempSync(join(tmpdir(), 'gotreceipts-remote-'));
-  t.after(() => rmSync(remote, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const remote = tempFolder(t, 'remote');
   assert.equal(gitIn(remote, 'init', '--quiet', '--bare').status, 0);
   assert.equal(gitIn(repo, 'remote', 'add', 'origin', remote).status, 0);
   return remote;
+}
+
+/** True when the remote holds a branch of this name. */
+export function remoteHas(remote: string, branch: string): boolean {
+  return gitIn(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).status === 0;
+}
+
+/**
+ * What the remote holds of the records and approvals of a commit: the id of the small commit
+ * that carries them, or an empty text when it holds none.
+ */
+export function receiptsOnRemote(remote: string, commit: string): string {
+  return gitIn(remote, 'rev-parse', '--verify', '--quiet', `refs/gotreceipts/${commit}`).stdout.trim();
+}
+
+/**
+ * A clone of `remote` with its main checked out, in a folder of its own that is removed when
+ * the test ends. It stands for another machine: it holds the history and nothing else.
+ * `cloneArgs` are more words for "git clone", such as "--depth=1".
+ */
+export function cloneOf(t: TestContext, remote: string, ...cloneArgs: string[]): string {
+  const folder = tempFolder(t, 'clone');
+  const cloned = gitIn(tmpdir(), 'clone', '--quiet', '--branch', 'main', ...cloneArgs, remote, folder);
+  assert.equal(cloned.status, 0, cloned.stderr);
+  return folder;
 }
 
 /** Puts a pre-push hook in the repository that calls the built tool, like an installed hook would. */
@@ -133,8 +191,7 @@ export function installPushHook(repo: string): void {
  * mean the same on every machine, so it runs with this.
  */
 export function noPersonalGitSettings(t: TestContext): Record<string, string> {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-gitconfig-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const folder = tempFolder(t, 'gitconfig');
   const empty = join(folder, 'gitconfig');
   writeFileSync(empty, '');
   return { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: folder };
@@ -165,8 +222,7 @@ export interface TestKey {
 }
 
 export function testKey(t: TestContext): TestKey {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-key-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const folder = tempFolder(t, 'key');
   const file = join(folder, 'key');
   const made = spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', '', '-f', file], { encoding: 'utf8' });
   assert.equal(made.status, 0, `ssh-keygen could not make a test key: ${made.error?.message ?? made.stderr}`);
@@ -186,8 +242,7 @@ export function plantApproval(
   key: TestKey,
   purpose = 'gotreceipts-approval',
 ): void {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-planted-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const folder = tempFolder(t, 'planted');
   const statement = join(folder, 'approval.json');
   writeFileSync(statement, text);
   const signed = spawnSync('ssh-keygen', ['-Y', 'sign', '-f', key.file, '-n', purpose, statement], { encoding: 'utf8' });

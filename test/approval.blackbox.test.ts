@@ -10,67 +10,30 @@ import { test, type TestContext } from 'node:test';
 
 import { checkSignature } from '../src/approval/ssh.ts';
 import { approvalText, newApproval } from '../src/approval/statement.ts';
-import { addRemote, gitIn, lastLine, plantApproval, runCli, tempRepo, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
+import { gatedCommit, ownerPolicy, served, tryPush, type Served } from './helpers/scene.ts';
+import { gitIn, lastLine, plantApproval, runCli, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
 
 /**
- * main asks for an approval of every commit. develop does not. The folder of the checks is
- * protected. One signer, "owner".
+ * The shared policy with an owner: main asks for an approval of every commit, develop does
+ * not. Here the folder of the checks is protected as well.
  */
 function policyFor(owner: TestKey, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    schema: 1,
-    levels: [{ name: 'G0', checks: [{ name: 'build', run: 'node checks/pass.js' }] }],
-    tiers: [
-      { branch: 'feature/*', level: 'G0' },
-      { branch: 'develop', level: 'G0' },
-      { branch: 'main', level: 'G0', needsApproval: true },
-    ],
-    protected: ['checks'],
-    approval: { signers: [{ name: 'owner', key: owner.publicKey }] },
-    ...extra,
-  };
+  return ownerPolicy(owner, { protected: ['checks'], ...extra });
 }
 
-interface Scene {
-  readonly repo: string;
+/** A repository on feature/thing, a remote whose main and develop hold the policy, and the key of the owner. */
+interface Scene extends Served {
   readonly owner: TestKey;
-  /** The commit main and develop point to on the remote. */
-  readonly base: string;
 }
 
-function head(repo: string): string {
-  return gitIn(repo, 'rev-parse', 'HEAD').stdout.trim();
-}
-
-/** A repository on feature/thing, and a remote whose main and develop hold the policy. */
 function scene(t: TestContext, makePolicy: (owner: TestKey) => unknown = policyFor): Scene {
   const owner = testKey(t);
-  const repo = tempRepo(t, { policy: makePolicy(owner) });
-  addRemote(t, repo);
-  assert.equal(gitIn(repo, 'push', '--quiet', 'origin', 'feature/thing:main', 'feature/thing:develop').status, 0);
-  assert.equal(gitIn(repo, 'fetch', '--quiet', 'origin').status, 0);
-  return { repo, owner, base: head(repo) };
-}
-
-/** Commits one changed file on the branch that is checked out, gates the commit, and returns it. */
-function gatedCommit(repo: string, path = 'data.txt', content = 'changed\n'): string {
-  writeIn(repo, path, content);
-  assert.equal(gitIn(repo, 'add', '--all').status, 0);
-  assert.equal(gitIn(repo, 'commit', '--quiet', '-m', `test: change ${path}`).status, 0);
-  const gate = runCli(repo, ['gate', '--level', 'G0']);
-  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
-  return head(repo);
+  return { ...served(t, makePolicy(owner)), owner };
 }
 
 /** Runs "approve" the way a person would: the command, and then the word on the keyboard. */
 function approve(repo: string, key: TestKey, args: string[], typed = 'approve\n') {
   return runCli(repo, ['approve', ...args, '--key', key.file], {}, typed);
-}
-
-/** Calls the push hook the way git does, for "push this commit to this branch, which is at `remoteCommit`". */
-function push(repo: string, commit: string, branch: string, remoteCommit: string) {
-  const line = `refs/heads/feature/thing ${commit} refs/heads/${branch} ${remoteCommit}\n`;
-  return runCli(repo, ['hook', 'pre-push', 'origin', 'https://example.com/repo.git'], {}, line);
 }
 
 function approvalFile(repo: string, commit: string, branch: string): string {
@@ -93,7 +56,7 @@ test('a branch that asks for an approval refuses a commit that has only its reco
   assert.match(verify.stdout, /An approval is the signature of an owner\. They give it in their own terminal:/);
   assert.equal(lastLine(verify.stdout), `  gotreceipts approve ${short} --for main`);
 
-  const pushed = push(s.repo, commit, 'main', s.base);
+  const pushed = tryPush(s.repo, commit, 'main', s.base);
   assert.equal(pushed.status, 1, pushed.stdout + pushed.stderr);
   assert.match(pushed.stdout, /main: commit \w{7} needs level G0: PASS/);
   assert.match(pushed.stdout, /there is no approval of this commit for "main"/);
@@ -132,7 +95,7 @@ test('the owner signs, and the same commit gets in', (t) => {
   assert.match(verify.stdout, /approved by owner, 0\.0 hours ago/);
   assert.equal(lastLine(verify.stdout), `VERDICT: PASS (commit ${short} satisfies level G0, and is approved for "main")`);
 
-  const pushed = push(s.repo, commit, 'main', s.base);
+  const pushed = tryPush(s.repo, commit, 'main', s.base);
   assert.equal(pushed.status, 0, pushed.stdout + pushed.stderr);
   assert.match(pushed.stdout, /approved by owner, 0\.0 hours ago/);
 });
@@ -234,7 +197,7 @@ test('a signature by a key the policy does not list does not count, and "approve
 
   // Made by hand and put in place, it is turned away at the door.
   plantApproval(t, s.repo, { commit, branch: 'main' }, approvalText(newApproval(commit, 'main', '0.0.0', Date.now())), stranger);
-  const pushed = push(s.repo, commit, 'main', s.base);
+  const pushed = tryPush(s.repo, commit, 'main', s.base);
   assert.equal(pushed.status, 1);
   assert.match(pushed.stdout, /the approval that is there does not count: it was not signed by a key the policy lists/);
 });
@@ -254,15 +217,15 @@ test('a commit cannot name its own signer: the keys that count are the ones on t
   assert.match(result.stdout, /VERDICT: NOT APPROVED \(the key that signed is not one the policy lists/);
 
   plantApproval(t, s.repo, { commit, branch: 'main' }, approvalText(newApproval(commit, 'main', '0.0.0', Date.now())), stranger);
-  assert.equal(push(s.repo, commit, 'main', s.base).status, 1);
+  assert.equal(tryPush(s.repo, commit, 'main', s.base).status, 1);
 
   // What lets the new signer in is the owner's signature, and a record made under the policy of main.
   assert.equal(approve(s.repo, s.owner, ['--for', 'main']).status, 0);
-  const stillNoRecord = push(s.repo, commit, 'main', s.base);
+  const stillNoRecord = tryPush(s.repo, commit, 'main', s.base);
   assert.equal(stillNoRecord.status, 1);
   assert.match(stillNoRecord.stdout, /VERDICT: REFUSED \(the pushed commit has no valid record\)/);
   assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
-  assert.equal(push(s.repo, commit, 'main', s.base).status, 0);
+  assert.equal(tryPush(s.repo, commit, 'main', s.base).status, 0);
 });
 
 test('a signature that was made for another purpose is not an approval', (t) => {
@@ -334,7 +297,7 @@ test('a change to a protected file needs an approval on every branch with a leve
   assert.match(verify.stdout, /1 protected file is not the same as on origin\/develop: checks\/extra\.js/);
   assert.match(verify.stdout, /approval: needed, because it would change a protected file/);
   assert.equal(lastLine(verify.stdout), `  gotreceipts approve ${short} --for develop`);
-  assert.equal(push(s.repo, commit, 'develop', s.base).status, 1);
+  assert.equal(tryPush(s.repo, commit, 'develop', s.base).status, 1);
 
   // Into main, both reasons are named.
   assert.match(
@@ -345,7 +308,7 @@ test('a change to a protected file needs an approval on every branch with a leve
   const approved = approve(s.repo, s.owner, ['--for', 'develop']);
   assert.equal(approved.status, 0, approved.stdout + approved.stderr);
   assert.match(approved.stdout, /changes: 1 file is not the same as on origin\/develop\n {4}\[protected\] checks\/extra\.js\n/);
-  assert.equal(push(s.repo, commit, 'develop', s.base).status, 0);
+  assert.equal(tryPush(s.repo, commit, 'develop', s.base).status, 0);
 });
 
 test('the gate says early that the commit will need an approval, and still gives its own verdict', (t) => {
@@ -376,7 +339,7 @@ test('with no signer in the policy the lock is open, and every command says so',
   const verify = runCli(s.repo, ['verify', '--for', 'main']);
   assert.equal(verify.status, 0, verify.stdout);
   assert.match(verify.stdout, /approval: not asked for\. The policy lists no signer, so a change to a protected file needs nobody's signature/);
-  assert.equal(push(s.repo, commit, 'main', s.base).status, 0);
+  assert.equal(tryPush(s.repo, commit, 'main', s.base).status, 0);
 
   const result = approve(s.repo, s.owner, ['--for', 'main']);
   assert.equal(result.status, 2);

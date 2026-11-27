@@ -2,12 +2,12 @@
 // The input is the JSON Claude Code sends, as its hooks reference describes it.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { runCli, tempFolder, tempRepo, writeIn } from './helpers/temp-repo.ts';
 
 /** What Claude Code sends before a shell command, with the fields its reference lists. */
 function call(command: string, tool = 'Bash'): string {
@@ -195,8 +195,7 @@ test('a repository with no committed policy has nothing to protect yet, so its f
 
 test('when the hook cannot find the repository, the edit is let through: it fails open', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
-  const outside = mkdtempSync(join(tmpdir(), 'gotreceipts-outside-'));
-  t.after(() => rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const outside = tempFolder(t, 'outside');
 
   for (const input of [edit(outside, 'gotreceipts.json'), edit(join(outside, 'no-such-folder'), 'gotreceipts.json')]) {
     const result = hook(repo, input);

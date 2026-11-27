@@ -1,4 +1,6 @@
 // The two pure steps of the pre-push hook: reading what git says, and deciding what needs a record.
+// The other steps of the hook (judge, report, send) touch git and the screen, and are tested from
+// the outside, in hook-pre-push.blackbox.test.ts.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -24,9 +26,7 @@ const POLICY: Policy = {
   record: { maxAgeHours: 24 },
 };
 
-function pushed(remoteRef: string, localSha = A, remoteSha = B): PushedRef {
-  return { localRef: 'refs/heads/local', localSha, remoteRef, remoteSha };
-}
+// --- reading what git says ---
 
 test('the lines git gives the hook are read into their four parts', () => {
   const parsed = parsePushLines(`refs/heads/feature/x ${A} refs/heads/feature/x ${B}\nrefs/heads/main ${B} refs/heads/main ${NONE}\n`);
@@ -62,6 +62,13 @@ test('a line of another shape is an error, never a guess', () => {
     assert.match(parsed.ok ? '' : parsed.error, /does not understand/);
   }
 });
+
+// --- 1. plan: what needs a record ---
+
+/** One pushed thing: commit A going to `remoteRef`, which holds commit B on the remote. */
+function pushed(remoteRef: string, localSha = A, remoteSha = B): PushedRef {
+  return { localRef: 'refs/heads/local', localSha, remoteRef, remoteSha };
+}
 
 /** The plain case: the policy came from the branch on the remote, and the commit changes nothing that is protected. */
 function plainSource(targetCommit: string): PolicySource {

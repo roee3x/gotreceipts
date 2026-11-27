@@ -1,8 +1,7 @@
 // Outside-in tests for "gotreceipts install", "uninstall" and "doctor".
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -13,7 +12,9 @@ import {
   lastLine,
   looseFiles,
   noPersonalGitSettings,
+  remoteHas,
   runCli,
+  tempFolder,
   tempRepo,
   writeIn,
 } from './helpers/temp-repo.ts';
@@ -43,10 +44,6 @@ function readSettings(repo: string): Record<string, any> {
 function writeForeignHook(repo: string, body: string, name = 'pre-push'): void {
   const path = writeIn(repo, `.git/hooks/${name}`, `#!/bin/sh\n${body}\n`);
   chmodSync(path, 0o755);
-}
-
-function remoteHas(remote: string, branch: string): boolean {
-  return gitIn(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).status === 0;
 }
 
 // --- install: the git hook ---
@@ -170,8 +167,7 @@ test('install needs a policy first, because the git hook would block every push 
 });
 
 test('outside a git repository the three commands cannot run', (t) => {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-plain-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const folder = tempFolder(t, 'plain');
   for (const command of ['install', 'uninstall', 'doctor']) {
     const result = runCli(folder, [command]);
     assert.equal(result.status, 2, command);
