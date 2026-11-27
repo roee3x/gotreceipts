@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { parsePushLines, planPush, type Entering, type PushedRef } from '../src/hook/pre-push.ts';
-import type { PolicyChoice } from '../src/policy/committed.ts';
+import type { PolicyChoice, PolicySource } from '../src/policy/committed.ts';
 import type { Policy } from '../src/policy/policy.ts';
 
 const A = 'a'.repeat(40);
@@ -63,28 +63,22 @@ test('a line of another shape is an error, never a guess', () => {
   }
 });
 
+/** The plain case: the policy came from the branch on the remote, and the commit changes nothing that is protected. */
+function plainSource(targetCommit: string): PolicySource {
+  return { kind: 'target', shown: 'the remote', commit: targetCommit, changedByCommit: false, protectedChanged: [], behindTarget: false };
+}
+
 /** Stands in for reading the policy off the target branch: every branch that exists holds POLICY. */
 function fromTarget(entering: Entering): PolicyChoice {
   return entering.targetCommit === undefined
     ? { ok: true, policy: POLICY, source: { kind: 'own', commit: entering.commit, because: `"${entering.branch}" does not exist yet` } }
-    : {
-        ok: true,
-        policy: POLICY,
-        source: {
-          kind: 'target',
-          shown: 'the remote',
-          commit: entering.targetCommit,
-          changedByCommit: false,
-          protectedChanged: [],
-          behindTarget: false,
-        },
-      };
+    : { ok: true, policy: POLICY, source: plainSource(entering.targetCommit) };
 }
 
 test('a commit entering a branch with a level needs a record at that level', () => {
   assert.deepEqual(planPush([pushed('refs/heads/feature/login'), pushed('refs/heads/main')], fromTarget), [
-    { kind: 'check', branch: 'feature/login', commit: A, level: 'G0', policy: POLICY, notes: [] },
-    { kind: 'check', branch: 'main', commit: A, level: 'G1', policy: POLICY, notes: [] },
+    { kind: 'check', branch: 'feature/login', commit: A, level: 'G0', policy: POLICY, source: plainSource(B), notes: [] },
+    { kind: 'check', branch: 'main', commit: A, level: 'G1', policy: POLICY, source: plainSource(B), notes: [] },
   ]);
 });
 
@@ -108,6 +102,7 @@ test('a brand-new branch is checked like any other, and the output says whose po
       commit: A,
       level: 'G1',
       policy: POLICY,
+      source: { kind: 'own', commit: A, because: '"main" does not exist yet' },
       notes: ['policy: the one in this commit, because "main" does not exist yet'],
     },
   ]);

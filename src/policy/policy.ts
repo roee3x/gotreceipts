@@ -42,6 +42,18 @@ export interface Tier {
   /** A branch name. `*` stands for any run of characters. */
   readonly branch: string;
   readonly level: string;
+  /**
+   * Set when every commit that enters the branch needs a signed approval, on top of its record.
+   * Left out otherwise, so that writing "false" changes nothing.
+   */
+  readonly needsApproval?: true;
+}
+
+/** Someone whose signature counts as an approval. */
+export interface Signer {
+  readonly name: string;
+  /** The public half of an SSH key: its type and its body, without the comment at the end. */
+  readonly key: string;
 }
 
 export interface Policy {
@@ -59,11 +71,22 @@ export interface Policy {
    * Left out when the policy lists none, so that writing an empty list changes nothing.
    */
   readonly protected?: readonly string[];
+  /**
+   * Who may approve, and for how long an approval counts.
+   * Left out when the policy lists no signer. Then nothing can ask for an approval:
+   * the lock is open until a first key is listed.
+   */
+  readonly approval?: {
+    readonly signers: readonly Signer[];
+    /** An approval older than this no longer counts. */
+    readonly maxAgeHours: number;
+  };
 }
 
 export const POLICY_FILE_NAME = 'gotreceipts.json';
 export const DEFAULT_TIMEOUT_MINUTES = 30;
 export const DEFAULT_MAX_AGE_HOURS = 24;
+export const DEFAULT_APPROVAL_HOURS = 24;
 
 /** Every check a level runs: its own, and those of every level before it, in order. */
 export function checksForLevel(policy: Policy, levelName: string): readonly Check[] | undefined {

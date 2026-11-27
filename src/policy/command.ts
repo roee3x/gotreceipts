@@ -44,13 +44,27 @@ function describe(io: Io, policy: Policy): void {
   io.out('Branches (the level a commit needs before it may enter the branch)');
   const branchWidth = width(policy.tiers.map((tier) => tier.branch));
   for (const tier of policy.tiers) {
-    io.out(`  ${tier.branch.padEnd(branchWidth)}  ${tier.level}`);
+    io.out(`  ${tier.branch.padEnd(branchWidth)}  ${tier.level}${tier.needsApproval === true ? ', and a signed approval' : ''}`);
   }
   io.out('');
 
   io.out('Protected files (a change to one of these is a change to the gate itself)');
   for (const pattern of protectedPatterns(policy)) {
     io.out(`  ${pattern}${pattern === POLICY_FILE_NAME ? '   (always, listed or not)' : ''}`);
+  }
+  io.out('');
+
+  if (policy.approval === undefined) {
+    io.out('Approval: NOT LOCKED. The policy lists no signer, so nothing asks for a signature:');
+    io.out('  a change to a protected file, the policy file included, gets in like any other change.');
+  } else {
+    io.out('Approval (a signature that only an owner can make)');
+    io.out(`  signers: ${policy.approval.signers.map((signer) => signer.name).join(', ')}`);
+    io.out('  asked for: a change to a protected file, on every branch with a level');
+    for (const tier of policy.tiers.filter((each) => each.needsApproval === true)) {
+      io.out(`  asked for: every commit that enters ${tier.branch}`);
+    }
+    io.out(`  an approval counts for ${policy.approval.maxAgeHours} hours, for one commit and one branch`);
   }
   io.out('');
 

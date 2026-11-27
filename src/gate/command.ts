@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { parseArgs } from 'node:util';
 
+import { approvalLines, judgeApproval } from '../approval/judge.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { currentBranch, headCommit, headTree, repoRoot, uncommittedChanges } from '../git.ts';
 import type { Io } from '../main.ts';
@@ -167,6 +168,11 @@ export async function gateCommand(args: readonly string[], io: Io): Promise<Exit
   io.out(`gotreceipts gate: level ${chosen.level} on commit ${shortCommit}${branch === undefined ? '' : ` (branch ${branch})`}`);
   io.out(`Policy: ${policyLine}`);
   for (const note of policyNotes) io.out(`        ${note}`);
+  // The gate runs the checks and does not ask for an approval. It only says, early, when the
+  // commit will need one at the door.
+  if (target !== undefined) {
+    for (const line of approvalLines(judgeApproval(root, policy, picked.source, commit, target, Date.now()))) io.out(`        ${line}`);
+  }
   io.out(`Policy id: ${id}`);
   io.out(`${checks.length} checks to run: ${checks.map((check) => check.name).join(', ')}`);
 
