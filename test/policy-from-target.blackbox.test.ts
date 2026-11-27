@@ -7,7 +7,8 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 
-import { addRemote, gitIn, installPushHook, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { commitFile, pushHook, pushLine, served, tryPush, type Served } from './helpers/scene.ts';
+import { addRemote, gitIn, head, installPushHook, lastLine, runCli, tempRepo, writeIn, type RunResult } from './helpers/temp-repo.ts';
 
 const TIERS = [
   { branch: 'feature/*', level: 'G0' },
@@ -38,41 +39,22 @@ const LOOSE = {
 /** The same policy, with no level for main at all. */
 const UNGUARDED = { ...STRICT, tiers: [TIERS[0]] };
 
-const NONE = '0'.repeat(40);
-
-function head(repo: string): string {
-  return gitIn(repo, 'rev-parse', 'HEAD').stdout.trim();
-}
-
-interface Scene {
-  readonly repo: string;
-  readonly remote: string;
-  /** The commit main points to, on the remote and in what the clone remembers of it. */
-  readonly base: string;
-}
-
-/** A repository on feature/thing, and a remote whose main holds `onMain` as its policy. */
-function scene(t: TestContext, onMain: unknown = STRICT): Scene {
-  const repo = tempRepo(t, { policy: onMain });
-  const remote = addRemote(t, repo);
-  assert.equal(gitIn(repo, 'push', '--quiet', 'origin', 'feature/thing:main').status, 0);
-  assert.equal(gitIn(repo, 'fetch', '--quiet', 'origin').status, 0);
-  return { repo, remote, base: head(repo) };
+/**
+ * A repository on feature/thing, and a remote whose main holds `onMain` as its policy.
+ * `base` is the commit main points to, on the remote and in what the clone remembers of it.
+ */
+function scene(t: TestContext, onMain: unknown = STRICT): Served {
+  return served(t, onMain, ['main']);
 }
 
 /** Commits a new policy file on the branch that is checked out, and returns the new commit. */
 function commitPolicy(repo: string, policy: unknown): string {
-  writeIn(repo, 'gotreceipts.json', `${JSON.stringify(policy, null, 2)}\n`);
-  assert.equal(gitIn(repo, 'add', '--all').status, 0);
-  const commit = gitIn(repo, 'commit', '--quiet', '-m', 'test: change the policy');
-  assert.equal(commit.status, 0, commit.stderr);
-  return head(repo);
+  return commitFile(repo, 'gotreceipts.json', `${JSON.stringify(policy, null, 2)}\n`);
 }
 
-/** Calls the push hook the way git does, for "push this commit to main, which is at `remoteCommit`". */
-function pushToMain(repo: string, commit: string, remoteCommit: string) {
-  const line = `refs/heads/feature/thing ${commit} refs/heads/main ${remoteCommit}\n`;
-  return runCli(repo, ['hook', 'pre-push', 'origin', 'https://example.com/repo.git'], {}, line);
+/** What the push hook answers to "push this commit to main, which is at `remoteCommit`". */
+function pushToMain(repo: string, commit: string, remoteCommit: string): RunResult {
+  return tryPush(repo, commit, 'main', remoteCommit);
 }
 
 function policyIdIn(output: string): string {
@@ -191,8 +173,7 @@ test('a branch that does not exist yet is judged by the policy in the commit its
   assert.equal(gate.status, 0, gate.stdout + gate.stderr);
   assert.match(gate.stdout, /Policy: the one in this commit, because "main" does not exist yet/);
 
-  const line = `refs/heads/feature/thing ${head(repo)} refs/heads/main ${NONE}\n`;
-  const push = runCli(repo, ['hook', 'pre-push', 'origin', 'https://example.com/repo.git'], {}, line);
+  const push = pushHook(repo, pushLine(head(repo), 'main'));
   assert.equal(push.status, 0, push.stdout + push.stderr);
   assert.match(push.stdout, /policy: the one in this commit, because "main" does not exist yet/);
 });
@@ -304,15 +285,6 @@ test('"policy --for" shows the policy a commit must pass to enter a branch, not 
 
 /** A policy that every commit passes, and that puts the folder of the checks under protection. */
 const GUARDED = { ...LOOSE, protected: ['checks'] };
-
-/** Commits one file on the branch that is checked out, and returns the new commit. */
-function commitFile(repo: string, path: string, content: string): string {
-  writeIn(repo, path, content);
-  assert.equal(gitIn(repo, 'add', '--all').status, 0);
-  const commit = gitIn(repo, 'commit', '--quiet', '-m', `test: change ${path}`);
-  assert.equal(commit.status, 0, commit.stderr);
-  return head(repo);
-}
 
 test('a commit that changes a protected file is named at every step: the gate, verify and the push', (t) => {
   const s = scene(t, GUARDED);

@@ -5,14 +5,25 @@
 // without a valid record, GitHub is never asked to merge.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { TestContext } from 'node:test';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { addRemote, gitIn, lastLine, runCli, tempRepo, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
+import {
+  addRemote,
+  cloneOf,
+  commitAt,
+  gitIn,
+  head,
+  lastLine,
+  receiptsOnRemote,
+  runCli,
+  tempRepo,
+  testKey,
+  writeIn,
+  type TestKey,
+} from './helpers/temp-repo.ts';
 
 /** A feature branch needs G0. Entering main needs G1. The branch "notes" has no level. */
 const POLICY = {
@@ -41,10 +52,6 @@ interface Scene {
   /** Every request the stand-in got, as lists of arguments. */
   requests(): string[][];
   mergeRequests(): string[][];
-}
-
-function revision(folder: string, name: string): string {
-  return gitIn(folder, 'rev-parse', name).stdout.trim();
 }
 
 /**
@@ -87,7 +94,7 @@ function scene(t: TestContext, base = 'main', withPolicy = true, policy: unknown
   return {
     repo,
     remote,
-    head: revision(repo, 'HEAD'),
+    head: head(repo),
     env: { GOTRECEIPTS_GH_COMMAND: JSON.stringify([process.execPath, fakeGh]), FAKE_GH_STATE: statePath },
     change(update) {
       const current = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, any>;
@@ -105,7 +112,7 @@ function moveBase(s: Scene, file: string, content: string, base = 'main'): strin
   writeIn(s.repo, file, content);
   assert.equal(gitIn(s.repo, 'add', '--all').status, 0);
   assert.equal(gitIn(s.repo, 'commit', '--quiet', '-m', 'test: someone else got in first').status, 0);
-  const commit = revision(s.repo, 'HEAD');
+  const commit = head(s.repo);
   assert.equal(gitIn(s.repo, 'switch', '--quiet', 'feature/thing').status, 0);
   return commit;
 }
@@ -114,7 +121,7 @@ function moveBase(s: Scene, file: string, content: string, base = 'main'): strin
 
 test('without a record, the merge is refused and GitHub is never asked to merge', (t) => {
   const s = scene(t);
-  const before = revision(s.remote, 'refs/heads/main');
+  const before = commitAt(s.remote, 'refs/heads/main');
 
   const result = runCli(s.repo, ['merge', '7'], s.env);
   assert.equal(result.status, 1, result.stdout + result.stderr);
@@ -124,7 +131,7 @@ test('without a record, the merge is refused and GitHub is never asked to merge'
   assert.equal(lastLine(result.stdout), 'To make a record: gotreceipts gate --for main');
 
   assert.deepEqual(s.mergeRequests(), []);
-  assert.equal(revision(s.remote, 'refs/heads/main'), before);
+  assert.equal(commitAt(s.remote, 'refs/heads/main'), before);
 });
 
 test('a record of a lower level is not enough', (t) => {
@@ -150,7 +157,7 @@ test('with a valid record, the pull request is merged, pinned to the tested comm
   assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${s.head.slice(0, 7)} into main)`);
 
   assert.deepEqual(s.mergeRequests(), [['pr', 'merge', '7', '--merge', '--match-head-commit', s.head]]);
-  assert.equal(revision(s.remote, 'refs/heads/main^{tree}'), revision(s.repo, `${s.head}^{tree}`));
+  assert.equal(commitAt(s.remote, 'refs/heads/main^{tree}'), commitAt(s.repo, `${s.head}^{tree}`));
 });
 
 // --- the merged result ---
@@ -451,10 +458,6 @@ function travelPolicy(owner: TestKey): unknown {
   return { ...(approvalPolicy(owner) as Record<string, unknown>), travel: true };
 }
 
-function receiptsOnRemote(s: Scene): string {
-  return gitIn(s.remote, 'rev-parse', '--verify', '--quiet', `refs/gotreceipts/${s.head}`).stdout.trim();
-}
-
 test('with "travel", what opened the door is on the remote before the merge', (t) => {
   const owner = testKey(t);
   const s = scene(t, 'main', true, travelPolicy(owner));
@@ -464,7 +467,7 @@ test('with "travel", what opened the door is on the remote before the merge', (t
   // Without an approval the door stays shut, and nothing is sent for a merge that did not happen.
   const refused = runCli(s.repo, ['merge', '7'], s.env);
   assert.equal(refused.status, 1, refused.stdout + refused.stderr);
-  assert.equal(receiptsOnRemote(s), '');
+  assert.equal(receiptsOnRemote(s.remote, s.head), '');
 
   // "approve" sends as it signs. The name is then taken off the remote again, as if the
   // approval had been signed while the remote could not be reached: the merge must send it.
@@ -472,13 +475,13 @@ test('with "travel", what opened the door is on the remote before the merge', (t
   assert.equal(approved.status, 0, approved.stdout + approved.stderr);
   assert.match(approved.stdout, /\n {2}sent to origin: 1 record and 1 approval\n/);
   assert.equal(gitIn(s.repo, 'push', '--quiet', 'origin', `:refs/gotreceipts/${s.head}`).status, 0);
-  assert.equal(receiptsOnRemote(s), '');
+  assert.equal(receiptsOnRemote(s.remote, s.head), '');
 
   const result = runCli(s.repo, ['merge', '7'], s.env);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /\n {2}sent to origin: 1 record and 1 approval\n {2}asking GitHub to merge commit/);
   assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${short} into main)`);
-  assert.notEqual(receiptsOnRemote(s), '');
+  assert.notEqual(receiptsOnRemote(s.remote, s.head), '');
   assert.deepEqual(
     gitIn(s.remote, 'ls-tree', '-r', '--name-only', `refs/gotreceipts/${s.head}`).stdout.trim().split('\n'),
     ['approvals/main.json', 'approvals/main.json.sig', 'records/G1.json'],
@@ -492,9 +495,7 @@ test('with "travel", another clone merges with the record and the approval it ge
   assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
   assert.equal(runCli(s.repo, ['approve', '--pr', '7', '--key', owner.file], s.env, 'approve\n').status, 0);
 
-  const other = mkdtempSync(join(tmpdir(), 'gotreceipts-clone-'));
-  t.after(() => rmSync(other, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
-  assert.equal(gitIn(tmpdir(), 'clone', '--quiet', '--branch', 'main', s.remote, other).status, 0);
+  const other = cloneOf(t, s.remote);
 
   const result = runCli(other, ['merge', '7'], s.env);
   assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -514,7 +515,7 @@ test('without "travel", the merge asks the remote for nothing and sends nothing'
   const result = runCli(s.repo, ['merge', '7'], s.env);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.doesNotMatch(result.stdout, /sent to|fetched from|already holds/);
-  assert.equal(receiptsOnRemote(s), '');
+  assert.equal(receiptsOnRemote(s.remote, s.head), '');
 });
 
 test('with "travel", a merge whose record cannot be sent still happens, and says loudly what is missing', (t) => {
@@ -539,5 +540,5 @@ test('with "travel", a merge whose record cannot be sent still happens, and says
     result.stdout,
   );
   assert.equal(lastLine(result.stdout), `VERDICT: MERGED (pull request #7, commit ${s.head.slice(0, 7)} into main)`);
-  assert.equal(receiptsOnRemote(s), '');
+  assert.equal(receiptsOnRemote(s.remote, s.head), '');
 });

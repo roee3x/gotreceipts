@@ -5,30 +5,33 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 
 import { approvalText, newApproval } from '../src/approval/statement.ts';
-import { addRemote, cliPath, gitIn, lastLine, runCli, tempRepo, testKey, writeIn, type TestKey } from './helpers/temp-repo.ts';
+import { gatedCommit, ownerPolicy, served } from './helpers/scene.ts';
+import {
+  cloneOf,
+  gitIn,
+  installPushHook,
+  lastLine,
+  receiptsOnRemote,
+  runCli,
+  shortHead,
+  tempFolder,
+  tempRepo,
+  testKey,
+  writeIn,
+  type TestKey,
+} from './helpers/temp-repo.ts';
 
 /**
- * develop needs a record. main also asks for an approval of every commit. One signer, "owner".
- * The one check passes, unless the environment tells it to fail.
+ * The shared policy with an owner: develop needs a record, and main also asks for an approval
+ * of every commit. Here the one check passes, unless the environment tells it to fail.
  */
 function policyFor(owner: TestKey, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    schema: 1,
-    levels: [{ name: 'G0', checks: [{ name: 'build', run: 'node checks/flaky.js' }] }],
-    tiers: [
-      { branch: 'feature/*', level: 'G0' },
-      { branch: 'develop', level: 'G0' },
-      { branch: 'main', level: 'G0', needsApproval: true },
-    ],
-    approval: { signers: [{ name: 'owner', key: owner.publicKey }] },
-    ...extra,
-  };
+  return ownerPolicy(owner, { levels: [{ name: 'G0', checks: [{ name: 'build', run: 'node checks/flaky.js' }] }], ...extra });
 }
 
 interface Scene {
@@ -40,37 +43,17 @@ interface Scene {
   readonly owner: TestKey;
 }
 
-/** A clone of `remote` in a folder of its own, removed when the test ends. */
-function cloneOf(t: TestContext, remote: string): string {
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-clone-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
-  const cloned = gitIn(tmpdir(), 'clone', '--quiet', '--branch', 'main', remote, folder);
-  assert.equal(cloned.status, 0, cloned.stderr);
-  return folder;
-}
-
 function scene(t: TestContext, extra: Record<string, unknown> = {}): Scene {
   const owner = testKey(t);
-  const first = tempRepo(t, { policy: policyFor(owner, extra) });
-  const remote = addRemote(t, first);
-  assert.equal(gitIn(first, 'push', '--quiet', 'origin', 'feature/thing:main', 'feature/thing:develop').status, 0);
-  assert.equal(gitIn(first, 'fetch', '--quiet', 'origin').status, 0);
-  return { first, second: cloneOf(t, remote), remote, owner };
+  const { repo, remote } = served(t, policyFor(owner, extra));
+  return { first: repo, second: cloneOf(t, remote), remote, owner };
 }
 
 /** Commits a change in `repo`, gates the commit, pushes the branch, and returns the commit. */
 function gatedAndPushed(repo: string, content = 'changed\n'): string {
-  writeIn(repo, 'data.txt', content);
-  assert.equal(gitIn(repo, 'commit', '--quiet', '--all', '-m', 'test: a change').status, 0);
-  const gate = runCli(repo, ['gate', '--level', 'G0']);
-  assert.equal(gate.status, 0, gate.stdout + gate.stderr);
+  const commit = gatedCommit(repo, 'data.txt', content);
   assert.equal(gitIn(repo, 'push', '--quiet', '--force', 'origin', 'feature/thing').status, 0);
-  return gitIn(repo, 'rev-parse', 'HEAD').stdout.trim();
-}
-
-/** What the remote holds under the name of the commit: the id of the small commit, or an empty text. */
-function onRemote(s: Scene, commit: string): string {
-  return gitIn(s.remote, 'rev-parse', '--verify', '--quiet', `refs/gotreceipts/${commit}`).stdout.trim();
+  return commit;
 }
 
 function stored(repo: string, kind: 'records' | 'approvals', commit: string, name: string): string {
@@ -127,7 +110,7 @@ test('a record made in one clone opens the door in another, after "send" and "fe
   assert.match(sent.stdout, /\n {2}sent: 1 record\n/);
   assert.match(sent.stdout, /\n {2}origin now holds 1 record of this commit\n/);
   assert.equal(lastLine(sent.stdout), `Sent. Another clone gets them with: gotreceipts fetch ${short}`);
-  assert.notEqual(onRemote(s, commit), '');
+  assert.notEqual(receiptsOnRemote(s.remote, commit), '');
 
   const fetched = runCli(s.second, ['fetch', commit]);
   assert.equal(fetched.status, 0, fetched.stdout + fetched.stderr);
@@ -278,8 +261,7 @@ test('a fetched approval counts only for its signature', (t) => {
   const approved = runCli(s.first, ['approve', '--for', 'main', '--key', stranger.file], {}, 'approve\n');
   assert.equal(approved.status, 1, approved.stdout + approved.stderr);
   // The command keeps nothing, so the same thing is done by hand.
-  const folder = mkdtempSync(join(tmpdir(), 'gotreceipts-forged-'));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const folder = tempFolder(t, 'forged');
   const text = approvalText(newApproval(commit, 'main', '0.0.0', Date.now()));
   const statement = writeIn(folder, 'approval.json', text);
   assert.equal(spawnSync('ssh-keygen', ['-Y', 'sign', '-f', stranger.file, '-n', 'gotreceipts-approval', statement]).status, 0);
@@ -308,12 +290,12 @@ test('"send" does not pass through the push hooks of the clone, which are for co
 
   const sent = runCli(s.first, ['send']);
   assert.equal(sent.status, 0, sent.stdout + sent.stderr);
-  assert.notEqual(onRemote(s, commit), '');
+  assert.notEqual(receiptsOnRemote(s.remote, commit), '');
 });
 
 test('"send" and "fetch" say plainly when there is nothing, and cannot run without a remote that answers', (t) => {
   const s = scene(t);
-  const short = gitIn(s.first, 'rev-parse', '--short=7', 'HEAD').stdout.trim();
+  const short = shortHead(s.first);
 
   const nothingToSend = runCli(s.first, ['send']);
   assert.equal(nothingToSend.status, 0, nothingToSend.stdout + nothingToSend.stderr);
@@ -399,19 +381,13 @@ test('with "travel" in the policy, "approve" sends the approval, and says so whe
 
 test('with "travel", the push hook sends the record of what it lets through, and a failed sending does not stop the push', (t) => {
   const s = scene(t, { travel: true });
-  writeIn(s.first, 'data.txt', 'changed\n');
-  assert.equal(gitIn(s.first, 'commit', '--quiet', '--all', '-m', 'test: a change').status, 0);
-  assert.equal(runCli(s.first, ['gate', '--level', 'G0']).status, 0);
-  const commit = gitIn(s.first, 'rev-parse', 'HEAD').stdout.trim();
-  chmodSync(
-    writeIn(s.first, '.git/hooks/pre-push', `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${cliPath.replace(/\\/g, '/')}" hook pre-push "$@"\n`),
-    0o755,
-  );
+  const commit = gatedCommit(s.first);
+  installPushHook(s.first);
 
   const pushed = gitIn(s.first, 'push', 'origin', 'feature/thing:develop');
   assert.equal(pushed.status, 0, pushed.stdout + pushed.stderr);
   assert.match(pushed.stdout + pushed.stderr, /develop: sent to the remote: 1 record/);
-  assert.notEqual(onRemote(s, commit), '');
+  assert.notEqual(receiptsOnRemote(s.remote, commit), '');
   assert.equal(gitIn(s.remote, 'rev-parse', 'refs/heads/develop').stdout.trim(), commit);
 
   // The same push again sends nothing new, and says nothing about it.
@@ -424,17 +400,14 @@ test('with "travel", the push hook sends the record of what it lets through, and
     writeIn(s.remote, 'hooks/update', '#!/bin/sh\ncase "$1" in\n  refs/gotreceipts/*) echo "that name is not allowed here" >&2; exit 1 ;;\nesac\nexit 0\n'),
     0o755,
   );
-  writeIn(s.first, 'data.txt', 'changed again\n');
-  assert.equal(gitIn(s.first, 'commit', '--quiet', '--all', '-m', 'test: another change').status, 0);
-  assert.equal(runCli(s.first, ['gate', '--level', 'G0']).status, 0);
-  const next = gitIn(s.first, 'rev-parse', 'HEAD').stdout.trim();
+  const next = gatedCommit(s.first, 'data.txt', 'changed again\n');
 
   const refused = gitIn(s.first, 'push', 'origin', 'feature/thing:develop');
   assert.equal(refused.status, 0, refused.stdout + refused.stderr);
   assert.match(refused.stdout + refused.stderr, /develop: NOT SENT to the remote: /);
   assert.ok((refused.stdout + refused.stderr).includes(`Send it after the push: gotreceipts send ${next.slice(0, 7)}`), refused.stderr);
   assert.equal(gitIn(s.remote, 'rev-parse', 'refs/heads/develop').stdout.trim(), next);
-  assert.equal(onRemote(s, next), '');
+  assert.equal(receiptsOnRemote(s.remote, next), '');
 });
 
 test('"policy" and "doctor" say whether records and approvals travel', (t) => {

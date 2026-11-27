@@ -1,3 +1,6 @@
+// Tests for the reader of the policy file, grouped the way the reader is built: the file as a
+// whole, then one group for each section of it, then the id that names a policy.
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -55,6 +58,8 @@ function assertError(raw: unknown, expected: RegExp): void {
   );
 }
 
+// --- the file as a whole ---
+
 test('a valid policy is read, with defaults filled in', () => {
   const policy = parseValid(validRaw());
   assert.equal(policy.schema, 1);
@@ -68,45 +73,6 @@ test('a valid policy is read, with defaults filled in', () => {
   assert.equal(testCheck?.timeoutMinutes, 10);
   assert.deepEqual(testCheck?.expect, { output: 'VERDICT: PASS', count: { pattern: '(\\d+) ran', atLeast: 1 } });
   assert.equal(policy.record.maxAgeHours, 12);
-});
-
-test('the record section is optional and defaults to 24 hours', () => {
-  const raw = validRaw();
-  delete raw['record'];
-  assert.equal(parseValid(raw).record.maxAgeHours, 24);
-});
-
-test('a level runs its own checks and those of every level before it', () => {
-  const policy = parseValid(validRaw());
-  const names = (level: string) => checksForLevel(policy, level)?.map((check) => check.name);
-  assert.deepEqual(names('G0'), ['build', 'test']);
-  assert.deepEqual(names('G1'), ['build', 'test', 'words']);
-  assert.deepEqual(names('G2'), ['build', 'test', 'words']);
-  assert.equal(names('G9'), undefined);
-  assert.equal(levelRank(policy, 'G1'), 1);
-  assert.equal(levelRank(policy, 'G9'), -1);
-});
-
-test('a branch is matched to its tier, and * stands for any run of characters', () => {
-  const policy = parseValid(validRaw());
-  assert.equal(tierForBranch(policy, 'feature/login')?.level, 'G0');
-  assert.equal(tierForBranch(policy, 'feature/deep/er')?.level, 'G0');
-  assert.equal(tierForBranch(policy, 'version/0.1')?.level, 'G1');
-  assert.equal(tierForBranch(policy, 'main')?.level, 'G2');
-  assert.equal(tierForBranch(policy, 'maintenance'), undefined);
-  assert.equal(tierForBranch(policy, 'my-feature/login'), undefined);
-  assert.equal(tierForBranch(policy, 'scratch'), undefined);
-});
-
-test('when two tiers match, the first one in the list wins', () => {
-  const raw = validRaw();
-  raw['tiers'] = [
-    { branch: 'version/0.1', level: 'G2' },
-    { branch: 'version/*', level: 'G1' },
-  ];
-  const policy = parseValid(raw);
-  assert.equal(tierForBranch(policy, 'version/0.1')?.level, 'G2');
-  assert.equal(tierForBranch(policy, 'version/0.2')?.level, 'G1');
 });
 
 test('text that is not JSON is refused', () => {
@@ -138,6 +104,27 @@ test('the schema number must be 1', () => {
   assertError(raw, /^schema: must be 1/);
   delete raw['schema'];
   assertError(raw, /^schema: must be 1/);
+});
+
+test('every problem is reported, not only the first', () => {
+  const raw = validRaw();
+  raw['schema'] = 7;
+  raw['levels'][0].checks[0].run = '';
+  raw['tiers'][0].level = 'nope';
+  assert.equal(errorsOf(raw).length, 3);
+});
+
+// --- levels, and the checks in them ---
+
+test('a level runs its own checks and those of every level before it', () => {
+  const policy = parseValid(validRaw());
+  const names = (level: string) => checksForLevel(policy, level)?.map((check) => check.name);
+  assert.deepEqual(names('G0'), ['build', 'test']);
+  assert.deepEqual(names('G1'), ['build', 'test', 'words']);
+  assert.deepEqual(names('G2'), ['build', 'test', 'words']);
+  assert.equal(names('G9'), undefined);
+  assert.equal(levelRank(policy, 'G1'), 1);
+  assert.equal(levelRank(policy, 'G9'), -1);
 });
 
 test('levels: at least one, each with a unique name and a list of checks', () => {
@@ -207,6 +194,30 @@ test('expect: patterns must be valid, and the count pattern needs a group', () =
   assertError(zero, /expect\.count\.atLeast: must be a whole number, 1 or more/);
 });
 
+// --- tiers: which branch needs which level ---
+
+test('a branch is matched to its tier, and * stands for any run of characters', () => {
+  const policy = parseValid(validRaw());
+  assert.equal(tierForBranch(policy, 'feature/login')?.level, 'G0');
+  assert.equal(tierForBranch(policy, 'feature/deep/er')?.level, 'G0');
+  assert.equal(tierForBranch(policy, 'version/0.1')?.level, 'G1');
+  assert.equal(tierForBranch(policy, 'main')?.level, 'G2');
+  assert.equal(tierForBranch(policy, 'maintenance'), undefined);
+  assert.equal(tierForBranch(policy, 'my-feature/login'), undefined);
+  assert.equal(tierForBranch(policy, 'scratch'), undefined);
+});
+
+test('when two tiers match, the first one in the list wins', () => {
+  const raw = validRaw();
+  raw['tiers'] = [
+    { branch: 'version/0.1', level: 'G2' },
+    { branch: 'version/*', level: 'G1' },
+  ];
+  const policy = parseValid(raw);
+  assert.equal(tierForBranch(policy, 'version/0.1')?.level, 'G2');
+  assert.equal(tierForBranch(policy, 'version/0.2')?.level, 'G1');
+});
+
 test('tiers: at least one, no duplicates, and the level must exist', () => {
   const none = validRaw();
   none['tiers'] = [];
@@ -221,58 +232,18 @@ test('tiers: at least one, no duplicates, and the level must exist', () => {
   assertError(typo, /^tiers\[0\]\.level: must be the name of a level \(G0, G1, G2\)/);
 });
 
+// --- record ---
+
+test('the record section is optional and defaults to 24 hours', () => {
+  const raw = validRaw();
+  delete raw['record'];
+  assert.equal(parseValid(raw).record.maxAgeHours, 24);
+});
+
 test('record.maxAgeHours must be a number above 0', () => {
   const raw = validRaw();
   raw['record'].maxAgeHours = 0;
   assertError(raw, /^record\.maxAgeHours: must be a number above 0/);
-});
-
-test('every problem is reported, not only the first', () => {
-  const raw = validRaw();
-  raw['schema'] = 7;
-  raw['levels'][0].checks[0].run = '';
-  raw['tiers'][0].level = 'nope';
-  assert.equal(errorsOf(raw).length, 3);
-});
-
-test('the policy id ignores layout and written-out defaults', () => {
-  const base = policyId(parseValid(validRaw()));
-
-  const spaced = parsePolicy(JSON.stringify(validRaw(), null, 8));
-  assert.ok(spaced.ok);
-  assert.equal(policyId(spaced.policy), base);
-
-  const reordered = validRaw();
-  const explicitDefault = {
-    tiers: reordered['tiers'],
-    record: reordered['record'],
-    levels: reordered['levels'],
-    schema: 1,
-  };
-  explicitDefault.levels[0].checks[0] = { run: 'npm run build', timeoutMinutes: 30, name: 'build' };
-  assert.equal(policyId(parseValid(explicitDefault)), base);
-
-  assert.match(base, /^sha256:[0-9a-f]{64}$/);
-});
-
-test('the policy id changes when the meaning changes', () => {
-  const base = policyId(parseValid(validRaw()));
-
-  const weakerCommand = validRaw();
-  weakerCommand['levels'][0].checks[1].run = 'echo ok';
-  assert.notEqual(policyId(parseValid(weakerCommand)), base);
-
-  const droppedExpectation = validRaw();
-  delete droppedExpectation['levels'][0].checks[1].expect;
-  assert.notEqual(policyId(parseValid(droppedExpectation)), base);
-
-  const lowerTier = validRaw();
-  lowerTier['tiers'][2].level = 'G0';
-  assert.notEqual(policyId(parseValid(lowerTier)), base);
-
-  const longerLife = validRaw();
-  longerLife['record'].maxAgeHours = 9999;
-  assert.notEqual(policyId(parseValid(longerLife)), base);
 });
 
 // --- protected files ---
@@ -380,6 +351,38 @@ test('the approval section is optional: signers, and for how long an approval co
   });
 });
 
+test('approval: each signer has a unique name and a unique key, written without its comment', () => {
+  const refused: [unknown, RegExp][] = [
+    ['owner', /^approval: must be an object/],
+    [{}, /^approval\.signers: must be a list with at least one signer/],
+    [{ signers: [] }, /^approval\.signers: must be a list with at least one signer/],
+    [{ signers: ['owner'] }, /^approval\.signers\[0\]: must be an object/],
+    [{ signers: [{ name: 'the owner', key: KEY }] }, /^approval\.signers\[0\]\.name: must be a name made of letters, digits, - and _/],
+    [{ signers: [{ name: 'owner', key: 'AAAA' }] }, /^approval\.signers\[0\]\.key: must be the public half of an SSH key/],
+    [{ signers: [{ name: 'owner', key: `ssh-dss ${'A'.repeat(68)}` }] }, /^approval\.signers\[0\]\.key: must be the public half of an SSH key/],
+    [
+      { signers: [{ name: 'owner', key: `${KEY} someone@some-machine` }] },
+      /^approval\.signers\[0\]\.key: leave out the comment at the end of the key\. It often holds a user name and the name of a machine/,
+    ],
+    [
+      { signers: [{ name: 'owner', key: KEY }, { name: 'owner', key: OTHER_KEY }] },
+      /^approval\.signers\[1\]\.name: "owner" is used by more than one signer/,
+    ],
+    [
+      { signers: [{ name: 'owner', key: KEY }, { name: 'helper', key: KEY }] },
+      /^approval\.signers\[1\]\.key: this key is listed more than once/,
+    ],
+    [{ signers: [{ name: 'owner', key: KEY, email: 'x' }] }, /^approval\.signers\[0\]\.email: unknown setting/],
+    [{ signers: [{ name: 'owner', key: KEY }], maxAgeHours: 0 }, /^approval\.maxAgeHours: must be a number above 0/],
+    [{ signers: [{ name: 'owner', key: KEY }], forever: true }, /^approval\.forever: unknown setting/],
+  ];
+  for (const [value, expected] of refused) {
+    const raw = validRaw();
+    raw['approval'] = value;
+    assertError(raw, expected);
+  }
+});
+
 test('a branch may ask for an approval only when someone is listed who can give it', () => {
   const noSigner = validRaw();
   noSigner['tiers'][2].needsApproval = true;
@@ -393,6 +396,15 @@ test('a branch may ask for an approval only when someone is listed who can give 
   const notYesOrNo = validRaw();
   notYesOrNo['tiers'][2].needsApproval = 'yes';
   assertError(notYesOrNo, /^tiers\[2\]\.needsApproval: must be true or false/);
+});
+
+test('a mistake in the approval section is reported once, not again for every branch that asks', () => {
+  const raw = validRaw();
+  raw['approval'] = { signers: [{ name: 'owner', key: 'not a key' }] };
+  raw['tiers'][2].needsApproval = true;
+  assert.deepEqual(errorsOf(raw), [
+    'approval.signers[0].key: must be the public half of an SSH key: its type and its body, such as "ssh-ed25519 AAAA..."',
+  ]);
 });
 
 test('writing "needsApproval: false" or the default hours is the same policy as leaving them out', () => {
@@ -430,37 +442,7 @@ test('the policy id changes when a signer is added, when a branch starts to ask,
   assert.notEqual(policyId(parseValid(longer)), id);
 });
 
-test('approval: each signer has a unique name and a unique key, written without its comment', () => {
-  const refused: [unknown, RegExp][] = [
-    ['owner', /^approval: must be an object/],
-    [{}, /^approval\.signers: must be a list with at least one signer/],
-    [{ signers: [] }, /^approval\.signers: must be a list with at least one signer/],
-    [{ signers: ['owner'] }, /^approval\.signers\[0\]: must be an object/],
-    [{ signers: [{ name: 'the owner', key: KEY }] }, /^approval\.signers\[0\]\.name: must be a name made of letters, digits, - and _/],
-    [{ signers: [{ name: 'owner', key: 'AAAA' }] }, /^approval\.signers\[0\]\.key: must be the public half of an SSH key/],
-    [{ signers: [{ name: 'owner', key: `ssh-dss ${'A'.repeat(68)}` }] }, /^approval\.signers\[0\]\.key: must be the public half of an SSH key/],
-    [
-      { signers: [{ name: 'owner', key: `${KEY} someone@some-machine` }] },
-      /^approval\.signers\[0\]\.key: leave out the comment at the end of the key\. It often holds a user name and the name of a machine/,
-    ],
-    [
-      { signers: [{ name: 'owner', key: KEY }, { name: 'owner', key: OTHER_KEY }] },
-      /^approval\.signers\[1\]\.name: "owner" is used by more than one signer/,
-    ],
-    [
-      { signers: [{ name: 'owner', key: KEY }, { name: 'helper', key: KEY }] },
-      /^approval\.signers\[1\]\.key: this key is listed more than once/,
-    ],
-    [{ signers: [{ name: 'owner', key: KEY, email: 'x' }] }, /^approval\.signers\[0\]\.email: unknown setting/],
-    [{ signers: [{ name: 'owner', key: KEY }], maxAgeHours: 0 }, /^approval\.maxAgeHours: must be a number above 0/],
-    [{ signers: [{ name: 'owner', key: KEY }], forever: true }, /^approval\.forever: unknown setting/],
-  ];
-  for (const [value, expected] of refused) {
-    const raw = validRaw();
-    raw['approval'] = value;
-    assertError(raw, expected);
-  }
-});
+// --- travel ---
 
 test('"travel" is true or false, and "false" is the same policy as leaving it out', () => {
   const id = policyId(parseValid(validRaw()));
@@ -483,11 +465,44 @@ test('"travel" is true or false, and "false" is the same policy as leaving it ou
   }
 });
 
-test('a mistake in the approval section is reported once, not again for every branch that asks', () => {
-  const raw = validRaw();
-  raw['approval'] = { signers: [{ name: 'owner', key: 'not a key' }] };
-  raw['tiers'][2].needsApproval = true;
-  assert.deepEqual(errorsOf(raw), [
-    'approval.signers[0].key: must be the public half of an SSH key: its type and its body, such as "ssh-ed25519 AAAA..."',
-  ]);
+// --- the id that names a policy ---
+
+test('the policy id ignores layout and written-out defaults', () => {
+  const base = policyId(parseValid(validRaw()));
+
+  const spaced = parsePolicy(JSON.stringify(validRaw(), null, 8));
+  assert.ok(spaced.ok);
+  assert.equal(policyId(spaced.policy), base);
+
+  const reordered = validRaw();
+  const explicitDefault = {
+    tiers: reordered['tiers'],
+    record: reordered['record'],
+    levels: reordered['levels'],
+    schema: 1,
+  };
+  explicitDefault.levels[0].checks[0] = { run: 'npm run build', timeoutMinutes: 30, name: 'build' };
+  assert.equal(policyId(parseValid(explicitDefault)), base);
+
+  assert.match(base, /^sha256:[0-9a-f]{64}$/);
+});
+
+test('the policy id changes when the meaning changes', () => {
+  const base = policyId(parseValid(validRaw()));
+
+  const weakerCommand = validRaw();
+  weakerCommand['levels'][0].checks[1].run = 'echo ok';
+  assert.notEqual(policyId(parseValid(weakerCommand)), base);
+
+  const droppedExpectation = validRaw();
+  delete droppedExpectation['levels'][0].checks[1].expect;
+  assert.notEqual(policyId(parseValid(droppedExpectation)), base);
+
+  const lowerTier = validRaw();
+  lowerTier['tiers'][2].level = 'G0';
+  assert.notEqual(policyId(parseValid(lowerTier)), base);
+
+  const longerLife = validRaw();
+  longerLife['record'].maxAgeHours = 9999;
+  assert.notEqual(policyId(parseValid(longerLife)), base);
 });

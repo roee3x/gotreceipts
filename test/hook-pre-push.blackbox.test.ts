@@ -6,7 +6,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { addRemote, gitIn, installPushHook, lastLine, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
+import { NO_COMMIT, pushHook, pushLine } from './helpers/scene.ts';
+import { addRemote, gitIn, head, installPushHook, lastLine, remoteHas, runCli, tempRepo, writeIn } from './helpers/temp-repo.ts';
 
 /** G0 holds one check that can be made to fail from outside. G1 adds a check that always passes. */
 const POLICY = {
@@ -22,25 +23,11 @@ const POLICY = {
 };
 
 const FAIL = { GOTRECEIPTS_TEST_FAIL: '1' };
-const NONE = '0'.repeat(40);
-
-function head(repo: string): string {
-  return gitIn(repo, 'rev-parse', 'HEAD').stdout.trim();
-}
-
-/** The line git would write for "push this commit to that branch". */
-function pushLine(commit: string, branch: string): string {
-  return `refs/heads/local ${commit} refs/heads/${branch} ${NONE}\n`;
-}
-
-function hook(repo: string, input: string) {
-  return runCli(repo, ['hook', 'pre-push', 'origin', 'https://example.com/repo.git'], {}, input);
-}
 
 test('a push of a commit with no record is refused, and the answer says how to make one', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
 
-  const result = hook(repo, pushLine(head(repo), 'feature/thing'));
+  const result = pushHook(repo, pushLine(head(repo), 'feature/thing'));
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /gotreceipts pre-push: 1 branch to check/);
   assert.match(
@@ -55,7 +42,7 @@ test('after a passing gate, the push is allowed', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   assert.equal(runCli(repo, ['gate']).status, 0);
 
-  const result = hook(repo, pushLine(head(repo), 'feature/thing'));
+  const result = pushHook(repo, pushLine(head(repo), 'feature/thing'));
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /needs level G0: PASS \(G0 record, passed 0\.0 hours ago\)/);
   // The branch is new on the other side, so there is no policy there to judge it by.
@@ -67,7 +54,7 @@ test('after a failing gate, the push is refused with the reason', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   assert.equal(runCli(repo, ['gate'], FAIL).status, 1);
 
-  const result = hook(repo, pushLine(head(repo), 'feature/thing'));
+  const result = pushHook(repo, pushLine(head(repo), 'feature/thing'));
   assert.equal(result.status, 1);
   assert.match(result.stdout, /G0 record, failed 0\.0 hours ago: the check "build" failed: exit code 1/);
 });
@@ -77,8 +64,8 @@ test('the level comes from the branch the commit would enter, not from the branc
   assert.equal(runCli(repo, ['gate']).status, 0);
 
   // The G0 record is enough for a feature branch, and not enough to enter main.
-  assert.equal(hook(repo, pushLine(head(repo), 'feature/other')).status, 0);
-  const toMain = hook(repo, pushLine(head(repo), 'main'));
+  assert.equal(pushHook(repo, pushLine(head(repo), 'feature/other')).status, 0);
+  const toMain = pushHook(repo, pushLine(head(repo), 'main'));
   assert.equal(toMain.status, 1);
   assert.match(toMain.stdout, /main: commit \w{7} needs level G1: REFUSED/);
   assert.match(toMain.stdout, /G0 record, passed 0\.0 hours ago: its level is below G1/);
@@ -93,7 +80,7 @@ test('one commit without a record refuses the whole push', (t) => {
   gitIn(repo, 'commit', '--quiet', '--all', '-m', 'test: second commit');
   const second = head(repo);
 
-  const result = hook(repo, pushLine(first, 'feature/one') + pushLine(second, 'feature/two'));
+  const result = pushHook(repo, pushLine(first, 'feature/one') + pushLine(second, 'feature/two'));
   assert.equal(result.status, 1);
   assert.match(result.stdout, /2 branches to check/);
   assert.match(result.stdout, /feature\/one: commit \w{7} needs level G0: PASS/);
@@ -107,7 +94,7 @@ test('when the commit to gate is not the one checked out, the advice says so', (
   writeIn(repo, 'data.txt', 'a second version\n');
   gitIn(repo, 'commit', '--quiet', '--all', '-m', 'test: second commit');
 
-  const result = hook(repo, pushLine(first, 'feature/thing'));
+  const result = pushHook(repo, pushLine(first, 'feature/thing'));
   assert.equal(result.status, 1);
   assert.equal(lastLine(result.stdout), `  gotreceipts gate --for feature/thing   (with commit ${first.slice(0, 7)} checked out)`);
 });
@@ -118,9 +105,9 @@ test('a branch without a level, a tag and a deletion are let through, and each i
 
   const input =
     pushLine(commit, 'notes') +
-    `refs/tags/v1 ${commit} refs/tags/v1 ${NONE}\n` +
-    `(delete) ${NONE} refs/heads/main ${commit}\n`;
-  const result = hook(repo, input);
+    `refs/tags/v1 ${commit} refs/tags/v1 ${NO_COMMIT}\n` +
+    `(delete) ${NO_COMMIT} refs/heads/main ${commit}\n`;
+  const result = pushHook(repo, input);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /0 branches to check/);
   assert.match(result.stdout, /notes: not checked \(the policy sets no level for this branch\)/);
@@ -131,7 +118,7 @@ test('a branch without a level, a tag and a deletion are let through, and each i
 
 test('a push that changes nothing is allowed', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
-  const result = hook(repo, '');
+  const result = pushHook(repo, '');
   assert.equal(result.status, 0);
   assert.equal(lastLine(result.stdout), 'VERDICT: PASS (nothing in this push needs a record)');
 });
@@ -141,7 +128,7 @@ test('without a committed policy the hook cannot check, and that blocks the push
   // A policy file that is only in the folder does not count.
   writeIn(repo, 'gotreceipts.json', `${JSON.stringify(POLICY)}\n`);
 
-  const result = hook(repo, pushLine(head(repo), 'feature/thing'));
+  const result = pushHook(repo, pushLine(head(repo), 'feature/thing'));
   assert.equal(result.status, 2);
   assert.match(result.stderr, /CANNOT CHECK: feature\/thing: commit \w{7} holds no policy file \(gotreceipts\.json\)\. Only a committed policy counts/);
   assert.match(result.stderr, /The push is blocked\. A check that could not run is never treated as a pass\./);
@@ -149,7 +136,7 @@ test('without a committed policy the hook cannot check, and that blocks the push
 
 test('input the hook does not understand blocks the push', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
-  const result = hook(repo, 'this is not what git writes\n');
+  const result = pushHook(repo, 'this is not what git writes\n');
   assert.equal(result.status, 2);
   assert.match(result.stderr, /CANNOT CHECK: git gave a line this hook does not understand/);
 });
@@ -183,16 +170,10 @@ test('an unknown hook name, or none, is "could not run"', (t) => {
 
 // --- git itself calls the hook ---
 
-const installHook = installPushHook;
-
-function remoteHas(remote: string, branch: string): boolean {
-  return gitIn(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).status === 0;
-}
-
 test('a real git push is stopped when the commit has no record', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const remote = addRemote(t, repo);
-  installHook(repo);
+  installPushHook(repo);
 
   const push = gitIn(repo, 'push', 'origin', 'feature/thing');
   assert.notEqual(push.status, 0, 'git must report the push as failed');
@@ -203,7 +184,7 @@ test('a real git push is stopped when the commit has no record', (t) => {
 test('a real git push goes through once the commit has its record', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const remote = addRemote(t, repo);
-  installHook(repo);
+  installPushHook(repo);
   assert.equal(runCli(repo, ['gate']).status, 0);
 
   const push = gitIn(repo, 'push', 'origin', 'feature/thing');
@@ -215,7 +196,7 @@ test('a real git push goes through once the commit has its record', (t) => {
 test('a real git push to a higher branch needs the higher level', (t) => {
   const repo = tempRepo(t, { policy: POLICY });
   const remote = addRemote(t, repo);
-  installHook(repo);
+  installPushHook(repo);
   assert.equal(runCli(repo, ['gate']).status, 0);
 
   const tooLow = gitIn(repo, 'push', 'origin', 'feature/thing:main');
