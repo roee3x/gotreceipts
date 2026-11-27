@@ -34,25 +34,29 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** A hook: what it is given on its input, and the words that came after its name. */
+type Hook = (input: string, io: Io, more: readonly string[]) => ExitCode;
+
+const HOOKS: ReadonlyMap<string, Hook> = new Map<string, Hook>([
+  // Git also passes the name and the address of the remote. The decision does not depend on
+  // them. The name is only used afterwards, to send the records of what was let through.
+  ['pre-push', (input, io, [remote]) => prePush(input, io, Date.now(), remote)],
+  ['claude-code', (input, io) => claudeCodeHook(input, io)],
+]);
+
 export async function hookCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  const name = args[0];
+  const [name, ...more] = args;
 
   if (name === '--help' || name === '-h') {
     io.out(HOOK_USAGE);
     return EXIT.PASS;
   }
 
-  if (name === 'pre-push') {
-    // Git also passes the name and the address of the remote. The decision does not depend on
-    // them. The name is only used afterwards, to send the records of what was let through.
-    return prePush(await readStdin(), io, Date.now(), args[1]);
+  const hook = name === undefined ? undefined : HOOKS.get(name);
+  if (hook === undefined) {
+    io.err(name === undefined ? 'gotreceipts hook: no hook named.' : `gotreceipts hook: unknown hook "${name}".`);
+    io.err(HOOK_USAGE);
+    return EXIT.CANNOT_RUN;
   }
-
-  if (name === 'claude-code') {
-    return claudeCodeHook(await readStdin(), io);
-  }
-
-  io.err(name === undefined ? 'gotreceipts hook: no hook named.' : `gotreceipts hook: unknown hook "${name}".`);
-  io.err(HOOK_USAGE);
-  return EXIT.CANNOT_RUN;
+  return hook(await readStdin(), io, more);
 }

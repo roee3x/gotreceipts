@@ -7,6 +7,16 @@ import { keptName } from './hook-script.ts';
 import { currentLauncher, findHooksFolder, readHookState, type HookName } from './hooks.ts';
 import { readSkillState, SKILL_FILE, type SkillState } from './skill.ts';
 
+/**
+ * What "doctor" and "install" say about one clone. The file has three parts:
+ *
+ *   looking     what is in place here: the policy, the two hooks and the skill. It changes nothing.
+ *   the rows    one row for each of them, in words.
+ *   two lists   what this clone stops from now on, and, just as plainly, what it does not.
+ */
+
+// --- looking ---
+
 /** What was found about one git hook in this clone. */
 export type HookFinding =
   | { readonly state: 'installed'; readonly keptOlder: boolean }
@@ -46,6 +56,11 @@ export interface Inspection {
   readonly skill: SkillState;
 }
 
+/** True when the tool a hook calls is still where the hook says. */
+function isThere(cli: string | undefined): cli is string {
+  return cli !== undefined && existsSync(cli);
+}
+
 function inspectHook(root: string, name: HookName): HookFinding {
   const place = findHooksFolder(root);
   if (place.kind === 'custom') return { state: 'custom-folder', setting: place.setting };
@@ -54,7 +69,7 @@ function inspectHook(root: string, name: HookName): HookFinding {
   const state = readHookState(place.folder, name);
   if (state.kind === 'none') return { state: 'missing' };
   if (state.kind === 'foreign') return { state: 'foreign' };
-  if (state.cli === undefined || !existsSync(state.cli)) return { state: 'broken', cli: state.cli };
+  if (!isThere(state.cli)) return { state: 'broken', cli: state.cli };
   return { state: 'installed', keptOlder: state.keptOlder };
 }
 
@@ -62,7 +77,7 @@ function inspectAgent(root: string): AgentFinding {
   const state = readAgentState(root);
   if (state.kind === 'none') return { state: 'missing' };
   if (state.kind === 'unreadable') return { state: 'unreadable', reason: state.reason };
-  if (state.cli === undefined || !existsSync(state.cli)) return { state: 'broken', cli: state.cli };
+  if (!isThere(state.cli)) return { state: 'broken', cli: state.cli };
   return { state: state.current ? 'installed' : 'outdated' };
 }
 
@@ -81,15 +96,69 @@ export function inspect(root: string, policy: Policy): Inspection {
   };
 }
 
+/** The four facts the two lists and the verdict turn on. */
+interface Standing {
+  /** The push hook is in place and can find its tool. */
+  readonly pushHook: boolean;
+  /** The agent hook stops the merge commands. An entry of an older version still does. */
+  readonly agentHook: boolean;
+  /** The agent hook is the one this version writes, so it also asks about edits of protected files. */
+  readonly agentCurrent: boolean;
+  /** The policy lists a signer, so an approval can be asked for. */
+  readonly locked: boolean;
+}
+
+function standingOf(inspection: Inspection): Standing {
+  const agentCurrent = inspection.claudeCode.state === 'installed';
+  return {
+    pushHook: inspection.prePush.state === 'installed',
+    agentHook: agentCurrent || inspection.claudeCode.state === 'outdated',
+    agentCurrent,
+    locked: inspection.signers.length > 0,
+  };
+}
+
+// --- the rows ---
+
+/** The names of the three parts "install" puts in place. The report and the lines of "install" use the same ones. */
+export const PART = {
+  gitHook: 'git pre-push hook',
+  agentHook: 'Claude Code hook',
+  skill: 'Claude Code skill',
+} as const;
+
 /** The line that tells a hook in a shared hooks folder to call the tool. */
 export const SHARED_HOOK_LINE = 'gotreceipts hook pre-push "$@"';
+
+function policyLines(inspection: Inspection): string[] {
+  const levels = `${inspection.levels} ${inspection.levels === 1 ? 'level' : 'levels'}`;
+  const branches = inspection.guarded.length === 0 ? 'no branch' : inspection.guarded.join(', ');
+  return [`OK: ${levels}, and a level is set for ${branches}`];
+}
+
+function approvalLines(inspection: Inspection): string[] {
+  const { signers, approvalBranches } = inspection;
+  if (signers.length === 0) {
+    return ['NOT LOCKED: the policy lists no signer', 'a change to a protected file, the policy file included, needs nobody\'s signature'];
+  }
+  const count = signers.length === 1 ? '1 signer' : `${signers.length} signers`;
+  const everyCommit = approvalBranches.length === 0 ? '' : `, and so does every commit into ${approvalBranches.join(', ')}`;
+  return [`LOCKED: ${count} (${signers.join(', ')})`, `a change to a protected file needs a signed approval${everyCommit}`];
+}
+
+function recordLines(inspection: Inspection): string[] {
+  return inspection.travel
+    ? [
+        'TRAVEL: a push, "approve" and "merge" send records and approvals to the remote',
+        'another clone gets them with "gotreceipts fetch", and "gotreceipts audit" reads them there',
+      ]
+    : ['STAY IN THIS CLONE: another clone, and CI, cannot see them', 'they are sent only when someone runs "gotreceipts send"'];
+}
 
 function hookLines(finding: HookFinding): string[] {
   switch (finding.state) {
     case 'installed':
-      return finding.keptOlder
-        ? ['INSTALLED', `an older hook, ${keptName('pre-push')}, runs before it`]
-        : ['INSTALLED'];
+      return finding.keptOlder ? ['INSTALLED', `an older hook, ${keptName('pre-push')}, runs before it`] : ['INSTALLED'];
     case 'broken':
       return [
         finding.cli === undefined
@@ -151,100 +220,129 @@ function skillLines(state: SkillState): string[] {
   }
 }
 
-/**
- * Prints what is enforced in this clone and, just as plainly, what is not.
- * Returns the parts that are not in place. An empty list means everything is.
- */
-export function printReport(io: Io, inspection: Inspection): string[] {
-  const label = (text: string): string => `  ${text.padEnd(20)}`;
-  const blank = ' '.repeat(22);
-  const row = (name: string, lines: readonly string[]): void => {
-    io.out(`${label(name)}${lines[0] ?? ''}`);
-    for (const line of lines.slice(1)) io.out(`${blank}${line}`);
-  };
-  const pushHook = inspection.prePush.state === 'installed';
-  const agentCurrent = inspection.claudeCode.state === 'installed';
-  // An entry of an older version still stops the merge commands. It only lacks the newer part.
-  const agentHook = agentCurrent || inspection.claudeCode.state === 'outdated';
+/** One row of the report: a name, what was found, and any lines that say more about it. */
+type Row = readonly [name: string, lines: readonly string[]];
 
-  row('policy file', [
-    `OK: ${inspection.levels} ${inspection.levels === 1 ? 'level' : 'levels'}, and a level is set for ${
-      inspection.guarded.length === 0 ? 'no branch' : inspection.guarded.join(', ')
-    }`,
-  ]);
-  const locked = inspection.signers.length > 0;
-  row(
-    'approval',
-    locked
-      ? [
-          `LOCKED: ${inspection.signers.length === 1 ? '1 signer' : `${inspection.signers.length} signers`} (${inspection.signers.join(', ')})`,
-          'a change to a protected file needs a signed approval' +
-            (inspection.approvalBranches.length === 0 ? '' : `, and so does every commit into ${inspection.approvalBranches.join(', ')}`),
-        ]
-      : [
-          'NOT LOCKED: the policy lists no signer',
-          'a change to a protected file, the policy file included, needs nobody\'s signature',
-        ],
-  );
-  row(
-    'records',
-    inspection.travel
-      ? ['TRAVEL: a push, "approve" and "merge" send records and approvals to the remote', 'another clone gets them with "gotreceipts fetch", and "gotreceipts audit" reads them there']
-      : ['STAY IN THIS CLONE: another clone, and CI, cannot see them', 'they are sent only when someone runs "gotreceipts send"'],
-  );
-  row('git pre-push hook', hookLines(inspection.prePush));
-  row('Claude Code hook', agentLines(inspection.claudeCode));
-  row('Claude Code skill', skillLines(inspection.skill));
-
-  io.out('');
-  io.out('This clone stops:');
-  if (pushHook) {
-    io.out('  - "git push" of a commit that has no valid record, into a branch with a level.');
-    io.out('  - A commit that edits the policy file to get itself in. It is judged by the policy that is already on the branch.');
-    if (locked) io.out('  - "git push" of a commit that needs an approval and has no valid one. See "approval" above for what needs one.');
-  }
-  if (inspection.prePush.state === 'broken') io.out('  - Every "git push", because the hook cannot find its tool.');
-  if (agentHook) {
-    io.out('  - Claude Code running a bare "gh pr merge", the same merge through "gh api", or "git push --no-verify".');
-    io.out('    It is told to use "gotreceipts merge", which checks the record first.');
-    io.out('  - Claude Code running "gotreceipts approve". An approval is for a person to give, and it is told to hand it over.');
-  }
-  if (agentCurrent) {
-    io.out(`  - Claude Code changing a protected file with its edit tools, without a question to the user first (${protectedSummary(inspection)}).`);
-  }
-  if (!pushHook && !agentHook && inspection.prePush.state !== 'broken') io.out('  - Nothing. No hook of this tool is in place.');
-
-  io.out('');
-  io.out('It does not stop:');
-  io.out('  - "git push --no-verify" typed by a person. That option skips every git hook.');
-  io.out('  - The merge button on GitHub, or a merge by a command the agent hook does not know: a script, an alias, another tool.');
-  io.out('    "gotreceipts audit", run in CI after each push, names such a merge afterwards.');
-  io.out('  - Another coding agent than Claude Code, and Claude Code itself when its hook cannot run. That hook is early feedback, not a lock.');
-  io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
-  io.out('  - A record that someone wrote by hand inside the .git folder.');
-  if (locked) {
-    io.out('  - An approval made with a key that needs no passphrase, or that sits unlocked in the background.');
-    io.out('    Whatever runs on this machine can sign with such a key. The signature is as strong as the key is kept.');
-  } else {
-    io.out('  - A change to the policy file that was merged like any other change. From then on it is the policy.');
-    io.out('    Listing a signer in the policy (approval.signers) closes this: such a change then needs a signature.');
-  }
-  io.out('  - A protected file that is changed by a shell command. The agent hook sees only the edit tools.');
-  io.out(
-    locked
-      ? '    Such a change is named, and refused without an approval, by the push hook and the merge command.'
-      : '    Such a change is named in the output of the gate, the push hook and the merge command.',
-  );
-  io.out('');
-
-  const missing: string[] = [];
-  if (!pushHook) missing.push('the push hook');
-  if (!agentCurrent) missing.push(agentHook ? 'the current Claude Code hook' : 'the Claude Code hook');
-  return missing;
+function rowsOf(inspection: Inspection): Row[] {
+  return [
+    ['policy file', policyLines(inspection)],
+    ['approval', approvalLines(inspection)],
+    ['records', recordLines(inspection)],
+    [PART.gitHook, hookLines(inspection.prePush)],
+    [PART.agentHook, agentLines(inspection.claudeCode)],
+    [PART.skill, skillLines(inspection.skill)],
+  ];
 }
+
+// --- the two lists ---
+
+/** One point of a list: its first line, and any lines that go on from it. */
+type Point = readonly string[];
 
 /** "the policy file" or "the policy file and 2 more that the policy lists". */
 function protectedSummary(inspection: Inspection): string {
   const listed = inspection.protectedListed;
   return listed === 0 ? 'the policy file' : `the policy file and ${listed} more that the policy lists`;
+}
+
+/** What this clone stops. Every point follows from a hook that is in place. */
+function stops(inspection: Inspection): Point[] {
+  const { pushHook, agentHook, agentCurrent, locked } = standingOf(inspection);
+  const points: Point[] = [];
+
+  if (pushHook) {
+    points.push(
+      ['"git push" of a commit that has no valid record, into a branch with a level.'],
+      ['A commit that edits the policy file to get itself in. It is judged by the policy that is already on the branch.'],
+    );
+    if (locked) points.push(['"git push" of a commit that needs an approval and has no valid one. See "approval" above for what needs one.']);
+  }
+  if (inspection.prePush.state === 'broken') points.push(['Every "git push", because the hook cannot find its tool.']);
+  if (agentHook) {
+    points.push(
+      [
+        'Claude Code running a bare "gh pr merge", the same merge through "gh api", or "git push --no-verify".',
+        'It is told to use "gotreceipts merge", which checks the record first.',
+      ],
+      ['Claude Code running "gotreceipts approve". An approval is for a person to give, and it is told to hand it over.'],
+    );
+  }
+  if (agentCurrent) {
+    points.push([
+      `Claude Code changing a protected file with its edit tools, without a question to the user first (${protectedSummary(inspection)}).`,
+    ]);
+  }
+  return points.length > 0 ? points : [['Nothing. No hook of this tool is in place.']];
+}
+
+/** What this clone does not stop, whatever is installed. Said as plainly as the first list. */
+function doesNotStop(inspection: Inspection): Point[] {
+  const { locked } = standingOf(inspection);
+  return [
+    ['"git push --no-verify" typed by a person. That option skips every git hook.'],
+    [
+      'The merge button on GitHub, or a merge by a command the agent hook does not know: a script, an alias, another tool.',
+      '"gotreceipts audit", run in CI after each push, names such a merge afterwards.',
+    ],
+    ['Another coding agent than Claude Code, and Claude Code itself when its hook cannot run. That hook is early feedback, not a lock.'],
+    ['A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.'],
+    ['A record that someone wrote by hand inside the .git folder.'],
+    locked
+      ? [
+          'An approval made with a key that needs no passphrase, or that sits unlocked in the background.',
+          'Whatever runs on this machine can sign with such a key. The signature is as strong as the key is kept.',
+        ]
+      : [
+          'A change to the policy file that was merged like any other change. From then on it is the policy.',
+          'Listing a signer in the policy (approval.signers) closes this: such a change then needs a signature.',
+        ],
+    [
+      'A protected file that is changed by a shell command. The agent hook sees only the edit tools.',
+      locked
+        ? 'Such a change is named, and refused without an approval, by the push hook and the merge command.'
+        : 'Such a change is named in the output of the gate, the push hook and the merge command.',
+    ],
+  ];
+}
+
+/** The parts that are not in place. An empty list means everything is. */
+function missingOf(inspection: Inspection): string[] {
+  const { pushHook, agentHook, agentCurrent } = standingOf(inspection);
+  return [
+    ...(pushHook ? [] : ['the push hook']),
+    ...(agentCurrent ? [] : [agentHook ? 'the current Claude Code hook' : 'the Claude Code hook']),
+  ];
+}
+
+// --- printing ---
+
+/** The width of the column of names in the rows. */
+const NAME_WIDTH = 20;
+
+function printRow(io: Io, [name, lines]: Row): void {
+  const [first = '', ...more] = lines;
+  io.out(`  ${name.padEnd(NAME_WIDTH)}${first}`);
+  for (const line of more) io.out(`${' '.repeat(NAME_WIDTH + 2)}${line}`);
+}
+
+function printList(io: Io, title: string, points: readonly Point[]): void {
+  io.out(title);
+  for (const [first = '', ...more] of points) {
+    io.out(`  - ${first}`);
+    for (const line of more) io.out(`    ${line}`);
+  }
+}
+
+/**
+ * Prints what is enforced in this clone and, just as plainly, what is not.
+ * Returns the parts that are not in place. An empty list means everything is.
+ */
+export function printReport(io: Io, inspection: Inspection): string[] {
+  for (const row of rowsOf(inspection)) printRow(io, row);
+  io.out('');
+  printList(io, 'This clone stops:', stops(inspection));
+  io.out('');
+  printList(io, 'It does not stop:', doesNotStop(inspection));
+  io.out('');
+  return missingOf(inspection);
 }

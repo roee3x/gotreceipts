@@ -22,6 +22,15 @@ import { APPROVAL_NAMESPACE } from './statement.ts';
  */
 const SSH_KEYGEN = 'ssh-keygen';
 
+/** Why the program did not start. */
+function whyNotStarted(error: Error): string {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ? 'the program "ssh-keygen" was not found. It comes with OpenSSH'
+    : `the program "ssh-keygen" could not be started: ${error.message}`;
+}
+
+// --- signing ---
+
 export type SignResult = { readonly ok: true; readonly signatureFile: string } | { readonly ok: false; readonly reason: string };
 
 /**
@@ -31,14 +40,16 @@ export type SignResult = { readonly ok: true; readonly signatureFile: string } |
  * at the keyboard for it, and this tool never sees what is typed.
  */
 export function signFile(keyFile: string, file: string): SignResult {
-  const result = spawnSync(SSH_KEYGEN, ['-Y', 'sign', '-f', keyFile, '-n', APPROVAL_NAMESPACE, file], {
+  const signed = spawnSync(SSH_KEYGEN, ['-Y', 'sign', '-f', keyFile, '-n', APPROVAL_NAMESPACE, file], {
     stdio: ['inherit', 'ignore', 'inherit'],
     windowsHide: true,
   });
-  if (result.error !== undefined) return { ok: false, reason: missingOr(result.error) };
-  if (result.status !== 0) return { ok: false, reason: 'ssh-keygen did not sign. Its own message is above' };
+  if (signed.error !== undefined) return { ok: false, reason: whyNotStarted(signed.error) };
+  if (signed.status !== 0) return { ok: false, reason: 'ssh-keygen did not sign. Its own message is above' };
   return { ok: true, signatureFile: `${file}.sig` };
 }
+
+// --- checking ---
 
 export type SignatureCheck =
   /** The signature is good, and it was made by this signer of the list. */
@@ -48,17 +59,15 @@ export type SignatureCheck =
   /** The check could not be made at all. Never a pass. */
   | { readonly kind: 'cannot-check'; readonly reason: string };
 
-function missingOr(error: Error): string {
-  return (error as NodeJS.ErrnoException).code === 'ENOENT'
-    ? 'the program "ssh-keygen" was not found. It comes with OpenSSH'
-    : `the program "ssh-keygen" could not be started: ${error.message}`;
+/** The signers as a list in the form ssh-keygen reads: one line each. Each key is allowed for approvals only. */
+function allowedSigners(signers: readonly Signer[]): string {
+  return signers.map((signer) => `${signer.name} namespaces="${APPROVAL_NAMESPACE}" ${signer.key}\n`).join('');
 }
 
 /**
  * Checks a signature over `statement` against the keys of `signers`.
  *
- * The signers are written into a list in the form ssh-keygen reads, in a folder of its own that
- * is removed again. Each key is allowed for approvals only.
+ * The list of signers is written into a folder of its own, which is removed again.
  *
  * `program` is there for one test, which checks what happens on a machine without ssh-keygen.
  */
@@ -71,14 +80,14 @@ export function checkSignature(signers: readonly Signer[], statement: Buffer, si
   }
   try {
     const allowed = join(folder, 'allowed_signers');
-    writeFileSync(allowed, signers.map((signer) => `${signer.name} namespaces="${APPROVAL_NAMESPACE}" ${signer.key}\n`).join(''));
+    writeFileSync(allowed, allowedSigners(signers));
 
     // 1. Whose key made the signature? This only looks at the key, not yet at what was signed.
     const found = spawnSync(program, ['-Y', 'find-principals', '-s', signatureFile, '-f', allowed], {
       encoding: 'utf8',
       windowsHide: true,
     });
-    if (found.error !== undefined) return { kind: 'cannot-check', reason: missingOr(found.error) };
+    if (found.error !== undefined) return { kind: 'cannot-check', reason: whyNotStarted(found.error) };
     const signer = found.status === 0 ? found.stdout.split(/\r?\n/)[0]?.trim() : undefined;
     if (signer === undefined || !signers.some((listed) => listed.name === signer)) {
       return { kind: 'bad', reason: 'it was not signed by a key the policy lists' };
@@ -90,7 +99,7 @@ export function checkSignature(signers: readonly Signer[], statement: Buffer, si
       encoding: 'utf8',
       windowsHide: true,
     });
-    if (verified.error !== undefined) return { kind: 'cannot-check', reason: missingOr(verified.error) };
+    if (verified.error !== undefined) return { kind: 'cannot-check', reason: whyNotStarted(verified.error) };
     if (verified.status !== 0) return { kind: 'bad', reason: 'its signature does not fit its text' };
     return { kind: 'good', signer };
   } finally {
