@@ -1,13 +1,12 @@
-import { parseArgs } from 'node:util';
-
 import { judgeApproval } from '../approval/judge.ts';
+import { shownAge } from '../clock.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { fetchRef, hasCommit, remoteBranchTip, repoRoot, resolveCommit, treeOf } from '../git.ts';
+import { isNoCommit, remoteBranch, repoRoot, resolveCommit, shortId, treeOf } from '../git.ts';
 import type { Io } from '../main.ts';
+import { readOptions } from '../options.ts';
 import { policyFor, protectedLine } from '../policy/committed.ts';
 import { tierForBranch } from '../policy/policy.ts';
 import { fetchReceipts, pickRemote } from '../travel/remote.ts';
-import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
 import { commitTime, entriesOf, isShallow, ownLine, type Entry } from './entries.ts';
 
@@ -61,8 +60,8 @@ function asOfEntry(text: string): string {
 }
 
 function headline(entry: Entry): string {
-  const on = entry.on.slice(0, 7);
-  if (entry.kind === 'merge') return `${on} merged commit ${entry.entered.slice(0, 7)}`;
+  const on = shortId(entry.on);
+  if (entry.kind === 'merge') return `${on} merged commit ${shortId(entry.entered)}`;
   if (entry.kind === 'many-parents') return `${on} a merge of more than two lines of history`;
   return `${on} pushed straight onto the branch (${entry.commits === 1 ? '1 commit' : `${entry.commits} commits`})`;
 }
@@ -93,7 +92,7 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
     return done('ok');
   }
   const { policy, source } = picked;
-  lines.push(`policy: the one "${branch}" held before, at commit ${entry.before.slice(0, 7)}`);
+  lines.push(`policy: the one "${branch}" held before, at commit ${shortId(entry.before)}`);
   const tier = tierForBranch(policy, branch);
   if (tier === undefined) {
     lines.push(`that policy set no level for "${branch}", so nothing was asked`);
@@ -103,7 +102,7 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
 
   const when = commitTime(root, entry.on);
   if (when === undefined) {
-    lines.push(`could not be checked: git could not say when commit ${entry.on.slice(0, 7)} was made`);
+    lines.push(`could not be checked: git could not say when commit ${shortId(entry.on)} was made`);
     return done('unchecked');
   }
 
@@ -111,7 +110,7 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
   // the record and the approval are judged below like any other.
   const got = fetchReceipts(root, remote, entry.entered, Date.now());
   if (got.kind === 'error') {
-    lines.push(`could not be checked: ${remote} could not be asked for the record of commit ${entry.entered.slice(0, 7)}: ${got.reason}`);
+    lines.push(`could not be checked: ${remote} could not be asked for the record of commit ${shortId(entry.entered)}: ${got.reason}`);
     return done('unchecked');
   }
 
@@ -125,7 +124,7 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
       return done('unchecked');
     }
     if (result !== tested) {
-      lines.push(`result: NOT WHAT WAS TESTED. The merge holds files that are not the same as in commit ${entry.entered.slice(0, 7)}`);
+      lines.push(`result: NOT WHAT WAS TESTED. The merge holds files that are not the same as in commit ${shortId(entry.entered)}`);
       outcome = 'lacking';
     }
   }
@@ -163,32 +162,9 @@ function judgeEntry(root: string, remote: string, branch: string, entry: Entry):
 const MARK: Record<Outcome, string> = { ok: 'OK', lacking: 'NOT AS ASKED', unchecked: 'NOT CHECKED' };
 
 export async function auditCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  let options: { since?: string; remote?: string; help?: boolean };
-  let positionals: string[];
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: { since: { type: 'string' }, remote: { type: 'string' }, help: { type: 'boolean', short: 'h' } },
-      allowPositionals: true,
-      strict: true,
-    });
-    options = parsed.values;
-    positionals = parsed.positionals;
-  } catch (error) {
-    io.err(`gotreceipts audit: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(AUDIT_USAGE);
-    return EXIT.CANNOT_RUN;
-  }
-
-  if (options.help === true) {
-    io.out(AUDIT_USAGE);
-    return EXIT.PASS;
-  }
-
-  const cannotRun = (reason: string): ExitCode => {
-    io.err(`gotreceipts audit: CANNOT RUN: ${reason}`);
-    return EXIT.CANNOT_RUN;
-  };
+  const start = readOptions({ command: 'audit', usage: AUDIT_USAGE, values: ['since', 'remote'], positionals: true }, args, io);
+  if (start.done) return start.code;
+  const { options, positionals, cannotRun } = start;
 
   const branch = positionals[0];
   if (positionals.length !== 1 || branch === undefined) return cannotRun('name one branch, for example: gotreceipts audit main');
@@ -208,14 +184,13 @@ export async function auditCommand(args: readonly string[], io: Io): Promise<Exi
   const remote = picked.name;
 
   // The branch as the remote has it now, asked from the remote itself.
-  const tip = remoteBranchTip(root, remote, branch);
-  if (tip === undefined) return cannotRun(`the remote "${remote}" holds no branch "${branch}", or did not answer`);
-  if (!hasCommit(root, tip) && !(fetchRef(root, remote, `refs/heads/${branch}`) && hasCommit(root, tip))) {
-    return cannotRun(`the newest commit of "${branch}" could not be downloaded`);
-  }
+  const onRemote = remoteBranch(root, remote, branch);
+  if (onRemote.kind === 'unknown') return cannotRun(`the remote "${remote}" holds no branch "${branch}", or did not answer`);
+  if (onRemote.kind === 'not-downloaded') return cannotRun(`the newest commit of "${branch}" could not be downloaded`);
+  const tip = onRemote.commit;
 
   let since: string | undefined;
-  if (options.since !== undefined && !/^0+$/.test(options.since)) {
+  if (options.since !== undefined && !isNoCommit(options.since)) {
     since = resolveCommit(root, options.since);
     if (since === undefined) return cannotRun(`there is no commit "${options.since}"`);
   }
@@ -228,10 +203,10 @@ export async function auditCommand(args: readonly string[], io: Io): Promise<Exi
   io.out(
     since === undefined
       ? `gotreceipts audit: the last entry into "${branch}" on ${remote}`
-      : `gotreceipts audit: what entered "${branch}" on ${remote} after commit ${since.slice(0, 7)}`,
+      : `gotreceipts audit: what entered "${branch}" on ${remote} after commit ${shortId(since)}`,
   );
   if (entries.length === 0) {
-    io.out(`VERDICT: PASS (nothing entered "${branch}" after commit ${(since ?? tip).slice(0, 7)})`);
+    io.out(`VERDICT: PASS (nothing entered "${branch}" after commit ${shortId(since ?? tip)})`);
     return EXIT.PASS;
   }
 

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { isObject, type JsonObject as Json } from '../json.ts';
 import { startLine, type Launcher } from './hook-script.ts';
 import { isCommitted, keepOutOfGit } from './local-file.ts';
 
@@ -23,12 +24,6 @@ export const SETTINGS_FILE = '.claude/settings.local.json';
  */
 export const MATCHER = 'Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit';
 const HOOK_WORDS = 'hook claude-code';
-
-type Json = Record<string, unknown>;
-
-function isObject(value: unknown): value is Json {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /**
  * The command line Claude Code runs for the hook, or undefined when the path of the tool holds

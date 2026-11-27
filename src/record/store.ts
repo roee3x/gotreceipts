@@ -1,26 +1,18 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { git } from '../git.ts';
+import { storeFolder, storeLabel, writeWhole } from '../store.ts';
 import { parseRecord, type GateRecord } from './record.ts';
 
-/**
- * The folder that holds the records: gotreceipts/records inside the repository's .git folder.
- *
- * Inside .git, a record can never be committed by accident.
- * It is the shared .git folder, so every worktree of the repository sees the same records.
- */
-export function recordsFolder(root: string): string | undefined {
-  const result = git(['rev-parse', '--git-common-dir'], root);
-  if (!result.ok) return undefined;
-  const commonDir = result.stdout.trim();
-  if (commonDir === '') return undefined;
-  return join(resolve(root, commonDir), 'gotreceipts', 'records');
+/** The folder that holds the records: "records" in the tool's folder inside .git. One folder per commit in it. */
+function recordsFolder(root: string): string | undefined {
+  const store = storeFolder(root);
+  return store === undefined ? undefined : join(store, 'records');
 }
 
 /** How a record's place is shown to the user: without the machine's folders in front of it. */
 export function recordLabel(record: Pick<GateRecord, 'commit' | 'level'>): string {
-  return `.git/gotreceipts/records/${record.commit}/${record.level}.json`;
+  return storeLabel('records', record.commit, `${record.level}.json`);
 }
 
 /**
@@ -33,11 +25,7 @@ export function writeRecord(root: string, record: GateRecord): boolean {
   try {
     const commitFolder = join(folder, record.commit);
     mkdirSync(commitFolder, { recursive: true });
-    const target = join(commitFolder, `${record.level}.json`);
-    // Written under another name first, then renamed, so a half-written record is never read.
-    const temporary = `${target}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`);
-    renameSync(temporary, target);
+    writeWhole(join(commitFolder, `${record.level}.json`), `${JSON.stringify(record, null, 2)}\n`);
     return true;
   } catch {
     return false;

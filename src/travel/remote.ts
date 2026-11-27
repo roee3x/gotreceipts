@@ -1,4 +1,4 @@
-import { fetchRef, git, hasCommit, remotes } from '../git.ts';
+import { git, obtainCommit, remoteRefCommit, remotes } from '../git.ts';
 import {
   filesOfCommit,
   keepReceipts,
@@ -50,17 +50,17 @@ export type Held =
  */
 export function remoteReceipts(root: string, remote: string, commit: string, now: number): Held {
   const ref = receiptsRef(commit);
-  const listed = git(['ls-remote', remote, ref], root);
-  if (!listed.ok) return { kind: 'error', reason: firstLine(listed.stderr) || `the remote "${remote}" did not answer` };
-  const sha = listed.stdout.trim().split(/\s+/)[0] ?? '';
-  if (!/^[0-9a-f]{40,64}$/.test(sha)) return { kind: 'none' };
+  const asked = remoteRefCommit(root, remote, ref);
+  if (!asked.ok) return { kind: 'error', reason: firstLine(asked.stderr) || `the remote "${remote}" did not answer` };
+  const receiptsCommit = asked.commit;
+  if (receiptsCommit === undefined) return { kind: 'none' };
 
-  if (!hasCommit(root, sha) && !(fetchRef(root, remote, ref) && hasCommit(root, sha))) {
+  if (!obtainCommit(root, remote, ref, receiptsCommit)) {
     return { kind: 'error', reason: `what the remote "${remote}" holds for this commit could not be downloaded` };
   }
-  const files = filesOfCommit(root, sha);
+  const files = filesOfCommit(root, receiptsCommit);
   if (files === undefined) return { kind: 'error', reason: `what the remote "${remote}" holds for this commit could not be read` };
-  return { kind: 'found', receiptsCommit: sha, receipts: notFromTheFuture(sortIntoReceipts(commit, files), now) };
+  return { kind: 'found', receiptsCommit, receipts: notFromTheFuture(sortIntoReceipts(commit, files), now) };
 }
 
 export type Sent =

@@ -1,4 +1,4 @@
-import { git } from '../git.ts';
+import { git, shortId } from '../git.ts';
 
 /**
  * What entered a branch, read from its history.
@@ -96,7 +96,7 @@ export function ownLine(root: string, tip: string, since: string | undefined): O
   if (since !== undefined && at !== since) {
     return {
       ok: false,
-      reason: `commit ${since.slice(0, 7)} is not on the branch's own line, so what entered after it cannot be told. Was the branch rewritten?`,
+      reason: `commit ${shortId(since)} is not on the branch's own line, so what entered after it cannot be told. Was the branch rewritten?`,
     };
   }
   return { ok: true, steps };

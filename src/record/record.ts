@@ -1,4 +1,7 @@
+import { UTC_TIME } from '../clock.ts';
 import type { CheckResult, CheckStatus } from '../gate/run-checks.ts';
+import { isFullId } from '../git.ts';
+import { isObject } from '../json.ts';
 
 /**
  * The record of one gate run: the receipt.
@@ -57,13 +60,7 @@ export function scrubPaths(text: string, paths: { readonly root: string; readonl
   return scrubbed;
 }
 
-const SHA = /^[0-9a-f]{40,64}$/;
-const UTC_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const STATUSES: readonly CheckStatus[] = ['pass', 'fail', 'skipped'];
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isCheckResult(value: unknown): value is CheckResult {
   if (!isObject(value)) return false;
@@ -98,8 +95,8 @@ export function parseRecord(text: string): RecordParse {
   if (raw['schema'] !== 1) return bad('schema');
   const tool = raw['tool'];
   if (!isObject(tool) || tool['name'] !== 'gotreceipts' || typeof tool['version'] !== 'string') return bad('tool');
-  if (typeof raw['commit'] !== 'string' || !SHA.test(raw['commit'])) return bad('commit');
-  if (typeof raw['tree'] !== 'string' || !SHA.test(raw['tree'])) return bad('tree');
+  if (typeof raw['commit'] !== 'string' || !isFullId(raw['commit'])) return bad('commit');
+  if (typeof raw['tree'] !== 'string' || !isFullId(raw['tree'])) return bad('tree');
   if (raw['branch'] !== null && typeof raw['branch'] !== 'string') return bad('branch');
   if (typeof raw['level'] !== 'string' || raw['level'] === '') return bad('level');
   if (typeof raw['policyId'] !== 'string' || !raw['policyId'].startsWith('sha256:')) return bad('policyId');

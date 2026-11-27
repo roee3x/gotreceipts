@@ -1,5 +1,8 @@
 import { spawnSync } from 'node:child_process';
 
+import { isFullId } from '../git.ts';
+import { isObject } from '../json.ts';
+
 /**
  * The few things this tool asks of GitHub, through GitHub's own command line tool, "gh".
  *
@@ -61,8 +64,8 @@ function failure(run: GhRun): string {
 }
 
 function field<T>(source: unknown, name: string, type: 'string' | 'number' | 'boolean'): T | undefined {
-  if (typeof source !== 'object' || source === null) return undefined;
-  const value = (source as Record<string, unknown>)[name];
+  if (!isObject(source)) return undefined;
+  const value = source[name];
   return typeof value === type ? (value as T) : undefined;
 }
 
@@ -90,7 +93,7 @@ export function viewPullRequest(cwd: string, number: number): Answer<PullRequest
   for (const [name, value] of Object.entries(pullRequest)) {
     if (value === undefined) return { ok: false, error: `the answer of "gh" has no usable "${name}"` };
   }
-  if (!/^[0-9a-f]{40,64}$/.test(pullRequest.headRefOid ?? '')) {
+  if (!isFullId(pullRequest.headRefOid ?? '')) {
     return { ok: false, error: 'the answer of "gh" does not name the head commit' };
   }
   return { ok: true, value: pullRequest as PullRequest };
@@ -123,7 +126,7 @@ export function mergeCommitOf(cwd: string, number: number): Answer<{ readonly st
     const parsed: unknown = JSON.parse(run.stdout);
     const state = field<string>(parsed, 'state', 'string');
     if (state === undefined) return { ok: false, error: 'the answer of "gh" has no usable "state"' };
-    const mergeCommit = (parsed as Record<string, unknown>)['mergeCommit'];
+    const mergeCommit = isObject(parsed) ? parsed['mergeCommit'] : undefined;
     return { ok: true, value: { state, commit: field<string>(mergeCommit, 'oid', 'string') } };
   } catch {
     return { ok: false, error: '"gh" answered with something that is not JSON' };

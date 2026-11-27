@@ -2,18 +2,18 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { parseArgs } from 'node:util';
 
+import { shownAge } from '../clock.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { differingFiles, fetchRef, git, hasCommit, remoteBranchTip, repoRoot, resolveCommit } from '../git.ts';
+import { differingFiles, git, obtainCommit, remoteBranch, repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
 import { remoteFor } from '../merge/command.ts';
 import { viewPullRequest } from '../merge/github.ts';
+import { commitAskedFor, readOptions } from '../options.ts';
 import { knownTarget, policyFor, sourceLines, type Target } from '../policy/committed.ts';
 import { isProtectedPath, tierForBranch } from '../policy/policy.ts';
 import { countOf } from '../travel/receipts.ts';
 import { pickRemote, sendReceipts, type Sent } from '../travel/remote.ts';
-import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
 import { readVersion } from '../version.ts';
 import { approvalLines, judgeApproval } from './judge.ts';
@@ -81,37 +81,10 @@ function readAnswer(): Promise<string> {
 }
 
 export async function approveCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  let options: { for?: string; pr?: string; key?: string; help?: boolean };
-  let positionals: string[];
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: {
-        for: { type: 'string' },
-        pr: { type: 'string' },
-        key: { type: 'string' },
-        help: { type: 'boolean', short: 'h' },
-      },
-      allowPositionals: true,
-      strict: true,
-    });
-    options = parsed.values;
-    positionals = parsed.positionals;
-  } catch (error) {
-    io.err(`gotreceipts approve: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(APPROVE_USAGE);
-    return EXIT.CANNOT_RUN;
-  }
+  const start = readOptions({ command: 'approve', usage: APPROVE_USAGE, values: ['for', 'pr', 'key'], positionals: true }, args, io);
+  if (start.done) return start.code;
+  const { options, positionals, cannotRun } = start;
 
-  if (options.help === true) {
-    io.out(APPROVE_USAGE);
-    return EXIT.PASS;
-  }
-
-  const cannotRun = (reason: string): ExitCode => {
-    io.err(`gotreceipts approve: CANNOT RUN: ${reason}`);
-    return EXIT.CANNOT_RUN;
-  };
   const notApproved = (why: string, more: readonly string[] = []): ExitCode => {
     io.out(`VERDICT: NOT APPROVED (${why})`);
     for (const line of more) io.out(line);
@@ -149,35 +122,27 @@ export async function approveCommand(args: readonly string[], io: Io): Promise<E
     // As in the merge command: the target branch is asked from the remote itself.
     const remote = remoteFor(root, pullRequest.url);
     if (remote === undefined) return cannotRun('this repository has no remote, so the target branch cannot be read');
-    const tip = remoteBranchTip(root, remote, branch);
-    if (tip === undefined) return cannotRun(`the remote "${remote}" could not say where "${branch}" is now`);
-    if (!hasCommit(root, tip) && !(fetchRef(root, remote, `refs/heads/${branch}`) && hasCommit(root, tip))) {
-      return cannotRun(`the newest commit of "${branch}" could not be downloaded`);
+    const onRemote = remoteBranch(root, remote, branch);
+    if (onRemote.kind === 'unknown') return cannotRun(`the remote "${remote}" could not say where "${branch}" is now`);
+    if (onRemote.kind === 'not-downloaded') return cannotRun(`the newest commit of "${branch}" could not be downloaded`);
+    if (!obtainCommit(root, remote, `refs/pull/${number}/head`, commit)) {
+      return cannotRun(`commit ${shortId(commit)} of the pull request could not be downloaded`);
     }
-    if (!hasCommit(root, commit) && !(fetchRef(root, remote, `refs/pull/${number}/head`) && hasCommit(root, commit))) {
-      return cannotRun(`commit ${commit.slice(0, 7)} of the pull request could not be downloaded`);
-    }
-    target = { branch, commit: tip, shown: `${remote}/${branch}` };
+    target = { branch, commit: onRemote.commit, shown: `${remote}/${branch}` };
     remoteOfPullRequest = remote;
   } else {
     if (options.for === undefined) return cannotRun('say which branch the commit is approved into: --for <branch>, or name a pull request with --pr');
-    const wanted = positionals[0] ?? 'HEAD';
-    const resolved = resolveCommit(root, wanted);
-    if (resolved === undefined) {
-      return cannotRun(positionals[0] === undefined ? 'the repository has no commit yet' : `there is no commit "${wanted}"`);
-    }
-    commit = resolved;
+    const asked = commitAskedFor(root, positionals[0]);
+    if (!asked.ok) return cannotRun(asked.reason);
+    commit = asked.commit;
     branch = options.for;
     target = knownTarget(root, branch);
   }
-  const shortCommit = commit.slice(0, 7);
+  const shortCommit = shortId(commit);
 
   // 2. The policy the commit is judged by: the one on the target branch. Its signers are the ones that count.
   const picked = policyFor(root, commit, target);
-  if (!picked.ok) {
-    for (const error of picked.errors) io.err(`gotreceipts approve: CANNOT RUN: ${error}`);
-    return EXIT.CANNOT_RUN;
-  }
+  if (!picked.ok) return cannotRun(...picked.errors);
   const { policy, source } = picked;
   const [policyLine = '', ...policyNotes] = sourceLines(source);
 
@@ -218,7 +183,7 @@ export async function approveCommand(args: readonly string[], io: Io): Promise<E
     marked.sort((a, b) => Number(b.protected) - Number(a.protected));
     io.out(`  changes: ${files.length} ${files.length === 1 ? 'file is' : 'files are'} not the same as on ${source.shown}`);
     for (const file of marked.slice(0, FILES_SHOWN)) io.out(`    ${file.protected ? '[protected] ' : ''}${file.path}`);
-    if (marked.length > FILES_SHOWN) io.out(`    and ${marked.length - FILES_SHOWN} more. All of them: git diff --stat ${source.commit.slice(0, 7)} ${shortCommit}`);
+    if (marked.length > FILES_SHOWN) io.out(`    and ${marked.length - FILES_SHOWN} more. All of them: git diff --stat ${shortId(source.commit)} ${shortCommit}`);
   }
   io.out(`  signers the policy lists: ${policy.approval.signers.map((signer) => signer.name).join(', ')}`);
 

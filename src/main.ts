@@ -17,27 +17,48 @@ export interface Io {
   err(line: string): void;
 }
 
+interface Command {
+  readonly name: string;
+  /** One line for the list of commands in the help text. */
+  readonly summary: string;
+  readonly run: (args: readonly string[], io: Io) => Promise<ExitCode>;
+}
+
+/**
+ * Every command of the tool, in the order the help text lists them.
+ * The help text and the choice of what to run are both made from this one list, so a command
+ * cannot be in one and missing from the other.
+ */
+const COMMANDS: readonly Command[] = [
+  { name: 'approve', summary: 'Sign an approval of one commit into one branch. For a person, not an agent', run: approveCommand },
+  { name: 'audit', summary: 'Look back at what entered a branch, and say whether each entry had its record', run: auditCommand },
+  { name: 'doctor', summary: 'Report what is enforced in this clone, and what is not', run: doctorCommand },
+  { name: 'fetch', summary: 'Get the records and approvals the remote holds for a commit', run: fetchCommand },
+  { name: 'gate', summary: 'Run the checks of a gate level on the current commit', run: gateCommand },
+  { name: 'hook', summary: 'The entry points git and the coding agent call. Not run by hand', run: hookCommand },
+  { name: 'install', summary: 'Put the hooks of this tool into this clone', run: installCommand },
+  { name: 'merge', summary: 'Merge a pull request on GitHub, only when its commit has its record', run: mergeCommand },
+  { name: 'policy', summary: 'Check gotreceipts.json and show what the gate will do', run: policyCommand },
+  { name: 'send', summary: 'Send the records and approvals of a commit to the remote', run: sendCommand },
+  { name: 'uninstall', summary: 'Remove the hooks again', run: uninstallCommand },
+  { name: 'verify', summary: 'Say whether a commit has a record that satisfies a gate level', run: verifyCommand },
+  { name: 'words', summary: 'Fail if a file, a file path or a commit message contains a private word', run: wordsCommand },
+];
+
+/** One line of a list in the help text: the name, then its explanation, lined up with the others. */
+function listed(name: string, explanation: string): string {
+  return `  ${name.padEnd(17)}${explanation}`;
+}
+
 export const USAGE = [
   'Usage: gotreceipts <command> [options]',
   '',
   'Commands:',
-  '  approve          Sign an approval of one commit into one branch. For a person, not an agent',
-  '  audit            Look back at what entered a branch, and say whether each entry had its record',
-  '  doctor           Report what is enforced in this clone, and what is not',
-  '  fetch            Get the records and approvals the remote holds for a commit',
-  '  gate             Run the checks of a gate level on the current commit',
-  '  hook             The entry points git and the coding agent call. Not run by hand',
-  '  install          Put the hooks of this tool into this clone',
-  '  merge            Merge a pull request on GitHub, only when its commit has its record',
-  '  policy           Check gotreceipts.json and show what the gate will do',
-  '  send             Send the records and approvals of a commit to the remote',
-  '  uninstall        Remove the hooks again',
-  '  verify           Say whether a commit has a record that satisfies a gate level',
-  '  words            Fail if a file, a file path or a commit message contains a private word',
+  ...COMMANDS.map((command) => listed(command.name, command.summary)),
   '',
   'Options:',
-  '  -h, --help       Show this help',
-  '  -v, --version    Show the version',
+  listed('-h, --help', 'Show this help'),
+  listed('-v, --version', 'Show the version'),
   '',
   'Run "gotreceipts <command> --help" for the options of one command.',
   '',
@@ -51,78 +72,27 @@ export const USAGE = [
  * A hook that calls the tool the wrong way must fail, never slip through.
  */
 export async function main(argv: readonly string[], io: Io): Promise<ExitCode> {
-  const command = argv[0];
-  const rest = argv.slice(1);
+  const [name, ...rest] = argv;
 
-  if (command === undefined) {
+  if (name === undefined) {
     io.err('gotreceipts: no command given.');
     io.err(USAGE);
     return EXIT.CANNOT_RUN;
   }
-
-  if (command === '--help' || command === '-h') {
+  if (name === '--help' || name === '-h') {
     io.out(USAGE);
     return EXIT.PASS;
   }
-
-  if (command === '--version' || command === '-v') {
+  if (name === '--version' || name === '-v') {
     io.out(readVersion());
     return EXIT.PASS;
   }
 
-  if (command === 'words') {
-    return wordsCommand(rest, io);
+  const command = COMMANDS.find((each) => each.name === name);
+  if (command === undefined) {
+    io.err(`gotreceipts: unknown command "${name}".`);
+    io.err(USAGE);
+    return EXIT.CANNOT_RUN;
   }
-
-  if (command === 'policy') {
-    return policyCommand(rest, io);
-  }
-
-  if (command === 'gate') {
-    return gateCommand(rest, io);
-  }
-
-  if (command === 'verify') {
-    return verifyCommand(rest, io);
-  }
-
-  if (command === 'hook') {
-    return hookCommand(rest, io);
-  }
-
-  if (command === 'install') {
-    return installCommand(rest, io);
-  }
-
-  if (command === 'uninstall') {
-    return uninstallCommand(rest, io);
-  }
-
-  if (command === 'doctor') {
-    return doctorCommand(rest, io);
-  }
-
-  if (command === 'merge') {
-    return mergeCommand(rest, io);
-  }
-
-  if (command === 'approve') {
-    return approveCommand(rest, io);
-  }
-
-  if (command === 'audit') {
-    return auditCommand(rest, io);
-  }
-
-  if (command === 'send') {
-    return sendCommand(rest, io);
-  }
-
-  if (command === 'fetch') {
-    return fetchCommand(rest, io);
-  }
-
-  io.err(`gotreceipts: unknown command "${command}".`);
-  io.err(USAGE);
-  return EXIT.CANNOT_RUN;
+  return command.run(rest, io);
 }

@@ -1,8 +1,6 @@
+import { hoursSince, isInTheFuture, shownAge } from '../clock.ts';
 import { checksForLevel, levelRank, type Policy } from '../policy/policy.ts';
 import type { GateRecord } from '../record/record.ts';
-
-/** How far ahead of the clock a record may be dated before it is distrusted. */
-const CLOCK_TOLERANCE_MS = 5 * 60_000;
 
 export type Decision =
   | {
@@ -32,12 +30,7 @@ export interface DecideInput {
 }
 
 function ageHours(record: GateRecord, now: number): number {
-  return (now - Date.parse(record.finishedAt)) / 3_600_000;
-}
-
-/** The age as it is shown. A record dated a little ahead of the clock is shown as 0.0, not as a negative age. */
-export function shownAge(hours: number): string {
-  return Math.max(0, hours).toFixed(1);
+  return hoursSince(Date.parse(record.finishedAt), now);
 }
 
 function describe(record: GateRecord, now: number): string {
@@ -62,8 +55,7 @@ function problemWith(record: GateRecord, input: DecideInput): string | undefined
   if (record.result !== 'pass') {
     return record.reason;
   }
-  const finished = Date.parse(record.finishedAt);
-  if (finished > now + CLOCK_TOLERANCE_MS) {
+  if (isInTheFuture(Date.parse(record.finishedAt), now)) {
     return 'it is dated in the future';
   }
   const hours = ageHours(record, now);

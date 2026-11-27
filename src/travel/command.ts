@@ -1,8 +1,7 @@
-import { parseArgs } from 'node:util';
-
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { repoRoot, resolveCommit } from '../git.ts';
+import { repoRoot, shortId } from '../git.ts';
 import type { Io } from '../main.ts';
+import { commitAskedFor, readOptions } from '../options.ts';
 import { countOf, RECEIPTS_PREFIX } from './receipts.ts';
 import { fetchReceipts, pickRemote, sendReceipts } from './remote.ts';
 
@@ -64,51 +63,25 @@ interface Asked {
 
 /** The part both commands share: the options, the commit and the remote. */
 function ask(name: 'send' | 'fetch', usage: string, args: readonly string[], io: Io): Asked | ExitCode {
-  let options: { remote?: string; help?: boolean };
-  let positionals: string[];
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: { remote: { type: 'string' }, help: { type: 'boolean', short: 'h' } },
-      allowPositionals: true,
-      strict: true,
-    });
-    options = parsed.values;
-    positionals = parsed.positionals;
-  } catch (error) {
-    io.err(`gotreceipts ${name}: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(usage);
-    return EXIT.CANNOT_RUN;
-  }
-
-  if (options.help === true) {
-    io.out(usage);
-    return EXIT.PASS;
-  }
-
-  const cannotRun = (reason: string): ExitCode => {
-    io.err(`gotreceipts ${name}: CANNOT RUN: ${reason}`);
-    return EXIT.CANNOT_RUN;
-  };
+  const start = readOptions({ command: name, usage, values: ['remote'], positionals: true }, args, io);
+  if (start.done) return start.code;
+  const { options, positionals, cannotRun } = start;
 
   if (positionals.length > 1) return cannotRun('name one commit, not several');
   const root = repoRoot(process.cwd());
   if (root === undefined) return cannotRun('this folder is not inside a git repository');
-  const wanted = positionals[0] ?? 'HEAD';
-  const commit = resolveCommit(root, wanted);
-  if (commit === undefined) {
-    return cannotRun(positionals[0] === undefined ? 'the repository has no commit yet' : `there is no commit "${wanted}"`);
-  }
+  const asked = commitAskedFor(root, positionals[0]);
+  if (!asked.ok) return cannotRun(asked.reason);
   const remote = pickRemote(root, options.remote);
   if (!remote.ok) return cannotRun(remote.reason);
-  return { root, commit, remote: remote.name };
+  return { root, commit: asked.commit, remote: remote.name };
 }
 
 export async function sendCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   const asked = ask('send', SEND_USAGE, args, io);
   if (typeof asked === 'number') return asked;
   const { root, commit, remote } = asked;
-  const shortCommit = commit.slice(0, 7);
+  const shortCommit = shortId(commit);
 
   io.out(`gotreceipts send: commit ${shortCommit}, to ${remote}`);
   const sent = sendReceipts(root, remote, commit, Date.now());
@@ -136,7 +109,7 @@ export async function fetchCommand(args: readonly string[], io: Io): Promise<Exi
   const asked = ask('fetch', FETCH_USAGE, args, io);
   if (typeof asked === 'number') return asked;
   const { root, commit, remote } = asked;
-  const shortCommit = commit.slice(0, 7);
+  const shortCommit = shortId(commit);
 
   io.out(`gotreceipts fetch: commit ${shortCommit}, from ${remote}`);
   const got = fetchReceipts(root, remote, commit, Date.now());

@@ -1,10 +1,10 @@
 import { homedir } from 'node:os';
-import { parseArgs } from 'node:util';
 
 import { approvalLines, judgeApproval } from '../approval/judge.ts';
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { currentBranch, headCommit, headTree, repoRoot, uncommittedChanges } from '../git.ts';
+import { currentBranch, headCommit, repoRoot, shortId, treeOf, uncommittedChanges } from '../git.ts';
 import type { Io } from '../main.ts';
+import { readOptions } from '../options.ts';
 import { knownTarget, policyFor, sourceLines } from '../policy/committed.ts';
 import { policyId } from '../policy/hash.ts';
 import { checksForLevel, tierForBranch, type Policy } from '../policy/policy.ts';
@@ -99,40 +99,16 @@ function resultLine(result: CheckResult, position: number, total: number): strin
 }
 
 export async function gateCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  let options: GateOptions;
-  try {
-    options = parseArgs({
-      args: [...args],
-      options: {
-        level: { type: 'string' },
-        for: { type: 'string' },
-        help: { type: 'boolean', short: 'h' },
-      },
-      allowPositionals: false,
-      strict: true,
-    }).values;
-  } catch (error) {
-    io.err(`gotreceipts gate: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(GATE_USAGE);
-    return EXIT.CANNOT_RUN;
-  }
-
-  if (options.help === true) {
-    io.out(GATE_USAGE);
-    return EXIT.PASS;
-  }
-
-  const cannotRun = (reason: string): ExitCode => {
-    io.err(`gotreceipts gate: CANNOT RUN: ${reason}`);
-    return EXIT.CANNOT_RUN;
-  };
+  const start = readOptions({ command: 'gate', usage: GATE_USAGE, values: ['level', 'for'] }, args, io);
+  if (start.done) return start.code;
+  const { options, cannotRun } = start;
 
   // 1. The exact commit the result will be about.
   const root = repoRoot(process.cwd());
   if (root === undefined) return cannotRun('this folder is not inside a git repository');
   const commit = headCommit(root);
   if (commit === undefined) return cannotRun('the repository has no commit yet');
-  const tree = headTree(root);
+  const tree = treeOf(root, commit);
   if (tree === undefined) return cannotRun('git could not read the commit');
   const branch = currentBranch(root);
 
@@ -150,10 +126,7 @@ export async function gateCommand(args: readonly string[], io: Io): Promise<Exit
   // 3. The policy: the one on the branch the commit wants to enter, not the commit's own copy.
   const target = targetBranch(options, branch);
   const picked = policyFor(root, commit, target === undefined ? undefined : knownTarget(root, target));
-  if (!picked.ok) {
-    for (const error of picked.errors) io.err(`gotreceipts gate: CANNOT RUN: ${error}`);
-    return EXIT.CANNOT_RUN;
-  }
+  if (!picked.ok) return cannotRun(...picked.errors);
   const { policy } = picked;
 
   // 4. The level.
@@ -163,7 +136,7 @@ export async function gateCommand(args: readonly string[], io: Io): Promise<Exit
 
   // 5. Say what will run before running it. A check that silently goes missing is then visible.
   const id = policyId(policy);
-  const shortCommit = commit.slice(0, 7);
+  const shortCommit = shortId(commit);
   const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
   io.out(`gotreceipts gate: level ${chosen.level} on commit ${shortCommit}${branch === undefined ? '' : ` (branch ${branch})`}`);
   io.out(`Policy: ${policyLine}`);

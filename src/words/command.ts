@@ -1,11 +1,11 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs } from 'node:util';
 
 import { EXIT, type ExitCode } from '../exit-codes.ts';
 import { committableFiles, repoRoot } from '../git.ts';
 import type { Io } from '../main.ts';
+import { readOptions } from '../options.ts';
 import { maskEntry, parseWordList, type WordEntry } from './list.ts';
 import { findMatches, type WordMatch } from './match.ts';
 
@@ -56,54 +56,21 @@ function hideEntries(text: string, entries: readonly WordEntry[]): string {
 }
 
 export async function wordsCommand(args: readonly string[], io: Io): Promise<ExitCode> {
-  let options: { list?: string; message?: string; 'show-words'?: boolean; help?: boolean };
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: {
-        list: { type: 'string' },
-        message: { type: 'string' },
-        'show-words': { type: 'boolean' },
-        help: { type: 'boolean', short: 'h' },
-      },
-      allowPositionals: false,
-      strict: true,
-    });
-    options = parsed.values;
-  } catch (error) {
-    io.err(`gotreceipts words: ${error instanceof Error ? error.message : String(error)}`);
-    io.err(WORDS_USAGE);
-    return EXIT.CANNOT_RUN;
-  }
-
-  if (options.help === true) {
-    io.out(WORDS_USAGE);
-    return EXIT.PASS;
-  }
+  const start = readOptions({ command: 'words', usage: WORDS_USAGE, values: ['list', 'message'], switches: ['show-words'] }, args, io);
+  if (start.done) return start.code;
+  const { options, cannotRun } = start;
 
   // 1. The list. No list, or an empty one, means there is nothing to check with.
   const listPath = resolveListPath(options.list);
-  if (!existsSync(listPath)) {
-    io.err(`gotreceipts words: CANNOT RUN: no word list at ${listPath}`);
-    return EXIT.CANNOT_RUN;
-  }
+  if (!existsSync(listPath)) return cannotRun(`no word list at ${listPath}`);
   const entries = parseWordList(readFileSync(listPath, 'utf8'));
-  if (entries.length === 0) {
-    io.err('gotreceipts words: CANNOT RUN: the word list has no entries');
-    return EXIT.CANNOT_RUN;
-  }
+  if (entries.length === 0) return cannotRun('the word list has no entries');
 
   // 2. The files git would commit.
   const root = repoRoot(process.cwd());
-  if (root === undefined) {
-    io.err('gotreceipts words: CANNOT RUN: this folder is not inside a git repository');
-    return EXIT.CANNOT_RUN;
-  }
+  if (root === undefined) return cannotRun('this folder is not inside a git repository');
   const files = committableFiles(root);
-  if (files === undefined) {
-    io.err('gotreceipts words: CANNOT RUN: git could not list the files');
-    return EXIT.CANNOT_RUN;
-  }
+  if (files === undefined) return cannotRun('git could not list the files');
 
   const showWords = options['show-words'] === true;
   const showPath = (path: string): string => (showWords ? path : hideEntries(path, entries));
@@ -122,10 +89,7 @@ export async function wordsCommand(args: readonly string[], io: Io): Promise<Exi
 
   // 3. The extra file, usually a commit message.
   if (options.message !== undefined) {
-    if (!existsSync(options.message)) {
-      io.err(`gotreceipts words: CANNOT RUN: no message file at ${options.message}`);
-      return EXIT.CANNOT_RUN;
-    }
+    if (!existsSync(options.message)) return cannotRun(`no message file at ${options.message}`);
     for (const match of findMatches(readFileSync(options.message, 'utf8'), entries)) {
       findings.push({ where: `message:${match.line}`, match });
     }
