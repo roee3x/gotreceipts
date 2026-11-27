@@ -49,27 +49,66 @@ function answer(io: Io, decision: 'deny' | 'ask', reason: string): ExitCode {
   return EXIT.PASS;
 }
 
+// --- a shell command ---
+
+function checkCommand(command: string, io: Io): ExitCode {
+  const rule = forbiddenCommand(command);
+  if (rule === undefined) return EXIT.PASS;
+  const launcher = startLine(currentLauncher()) ?? 'the command the user gives you';
+  return answer(io, 'deny', guardMessage(rule, launcher));
+}
+
+// --- an edit of a file ---
+
+interface Nearest<Found> {
+  readonly found: Found;
+  /** The names that were walked past on the way up, in their order. */
+  readonly below: readonly string[];
+}
+
+/**
+ * Walks from `path` upwards and stops at the first place `look` finds something.
+ *
+ * A file that is about to be written may not exist yet, and neither may its folder. So a
+ * question about such a file is asked of the nearest place above it that is there.
+ */
+function nearest<Found>(path: string, look: (place: string) => Found | undefined): Nearest<Found> | undefined {
+  const below: string[] = [];
+  let place = resolve(path);
+  for (;;) {
+    const found = look(place);
+    if (found !== undefined) return { found, below };
+    const parent = dirname(place);
+    if (parent === place) return undefined;
+    below.unshift(basename(place));
+    place = parent;
+  }
+}
+
+/** The folder a file is in, or the nearest one above it that exists. Undefined when none does. */
+function folderOf(file: string): string | undefined {
+  return nearest(dirname(file), (place) => (existsSync(place) && statSync(place).isDirectory() ? place : undefined))?.found;
+}
+
+function realPath(place: string): string | undefined {
+  try {
+    return realpathSync.native(place);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The one true spelling of a path. One file can be reached under several names: through a
  * link, or on Windows through a short name such as "PROGRA~1". Two names of the same file must
  * compare as equal, or a protected file could be edited under its other name.
  *
- * The file itself may not exist yet, so the nearest folder that does exist is looked up, and
- * the rest of the path is put back behind it.
+ * The true spelling of the nearest place that exists is looked up, and the rest of the path is
+ * put back behind it.
  */
 function trueSpelling(path: string): string {
-  const rest: string[] = [];
-  let existing = resolve(path);
-  for (;;) {
-    try {
-      return join(realpathSync.native(existing), ...rest);
-    } catch {
-      const parent = dirname(existing);
-      if (parent === existing) return resolve(path);
-      rest.unshift(basename(existing));
-      existing = parent;
-    }
-  }
+  const real = nearest(path, realPath);
+  return real === undefined ? resolve(path) : join(real.found, ...real.below);
 }
 
 /**
@@ -92,21 +131,11 @@ export function protectedFileMessage(path: string): string {
   ].join(' ');
 }
 
-/** The nearest folder at or above `path` that exists. A file that is about to be written may sit in a folder that is not there yet. */
-function nearestFolder(path: string): string {
-  let folder = resolve(path);
-  while (!existsSync(folder) || !statSync(folder).isDirectory()) {
-    const parent = dirname(folder);
-    if (parent === folder) break;
-    folder = parent;
-  }
-  return folder;
-}
-
 /** The edit of a file: asks the user when the file is protected, and lets every other edit through. */
 function checkEdit(file: string, cwd: string, io: Io): ExitCode {
   // The repository is the one the file is in. The session may have been started in a folder above it.
-  const root = repoRoot(nearestFolder(dirname(isAbsolute(file) ? file : resolve(cwd, file))));
+  const folder = folderOf(isAbsolute(file) ? file : resolve(cwd, file));
+  const root = folder === undefined ? undefined : repoRoot(folder);
   if (root === undefined) return EXIT.PASS;
   const path = pathInRepository(root, cwd, file);
   if (path === undefined) return EXIT.PASS;
@@ -122,26 +151,37 @@ function checkEdit(file: string, cwd: string, io: Io): ExitCode {
   return answer(io, 'ask', protectedFileMessage(path));
 }
 
-export function claudeCodeHook(input: string, io: Io): ExitCode {
-  let toolInput: JsonObject = {};
-  let cwd = process.cwd();
+// --- the call ---
+
+/** What Claude Code says about the call it is about to make, as far as this hook reads it. */
+interface Call {
+  readonly toolInput: JsonObject;
+  /** The folder the agent works in. A relative path of a file is counted from it. */
+  readonly cwd: string;
+}
+
+/** Reads the input. One that cannot be read holds nothing to check, and that is not an error here. */
+function readCall(input: string): Call {
+  const nothing: Call = { toolInput: {}, cwd: process.cwd() };
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(input);
-    if (isObject(parsed)) {
-      if (isObject(parsed['tool_input'])) toolInput = parsed['tool_input'];
-      if (typeof parsed['cwd'] === 'string' && parsed['cwd'] !== '') cwd = parsed['cwd'];
-    }
+    parsed = JSON.parse(input);
   } catch {
-    // Handled below: an input that cannot be read holds nothing to check.
+    return nothing;
   }
+  if (!isObject(parsed)) return nothing;
+  const { tool_input: toolInput, cwd } = parsed;
+  return {
+    toolInput: isObject(toolInput) ? toolInput : nothing.toolInput,
+    cwd: typeof cwd === 'string' && cwd !== '' ? cwd : nothing.cwd,
+  };
+}
+
+export function claudeCodeHook(input: string, io: Io): ExitCode {
+  const { toolInput, cwd } = readCall(input);
 
   const command = toolInput['command'];
-  if (typeof command === 'string') {
-    const rule = forbiddenCommand(command);
-    if (rule === undefined) return EXIT.PASS;
-    const launcher = startLine(currentLauncher()) ?? 'the command the user gives you';
-    return answer(io, 'deny', guardMessage(rule, launcher));
-  }
+  if (typeof command === 'string') return checkCommand(command, io);
 
   // The edit tools name the file as "file_path". The notebook tool names it "notebook_path".
   const file = toolInput['file_path'] ?? toolInput['notebook_path'];

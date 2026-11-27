@@ -5,10 +5,21 @@ import { readOptions } from '../options.ts';
 import { loadPolicy } from '../policy/load.ts';
 import type { Policy } from '../policy/policy.ts';
 import { installAgentHook, SETTINGS_FILE, uninstallAgentHook } from './claude-code.ts';
-import { inspect, printReport, SHARED_HOOK_LINE } from './doctor.ts';
+import { inspect, PART, printReport, SHARED_HOOK_LINE } from './doctor.ts';
 import { keptName, looksTemporary, type Launcher } from './hook-script.ts';
-import { currentLauncher, findHooksFolder, installHook, uninstallHook } from './hooks.ts';
-import { installSkill, SKILL_FILE, uninstallSkill } from './skill.ts';
+import { currentLauncher, findHooksFolder, installHook, uninstallHook, type UninstallOutcome } from './hooks.ts';
+import { installSkill, SKILL_FILE, uninstallSkill, type SkillUninstall } from './skill.ts';
+
+/**
+ * The three commands about the setup of one clone:
+ *
+ *   install     puts the two hooks and the skill in place, then reports like "doctor"
+ *   uninstall   takes out what "install" wrote, and nothing else
+ *   doctor      reports what is enforced here and what is not. It changes nothing
+ *
+ * Each of the three parts (git hook, Claude Code hook, skill) says in its own lines what
+ * happened to it. A part that could not be written never stops the other two.
+ */
 
 export const INSTALL_USAGE = [
   'Usage: gotreceipts install',
@@ -58,9 +69,11 @@ export const DOCTOR_USAGE = [
   'Exit codes: 0 = both hooks are in place, 1 = not both, 2 = the command could not run.',
 ].join('\n');
 
+// --- what install and doctor share ---
+
 type Setup = { readonly ok: true; readonly policy: Policy; readonly root: string } | { readonly ok: false; readonly code: ExitCode };
 
-/** What install and doctor share: read the options, find the repository, read the policy. These commands take no option but --help. */
+/** Reads the options, finds the repository, reads the policy. These commands take no option but --help. */
 function setUp(command: string, usage: string, args: readonly string[], io: Io): Setup {
   const start = readOptions({ command, usage }, args, io);
   if (start.done) return { ok: false, code: start.code };
@@ -80,84 +93,83 @@ function verdict(io: Io, missing: readonly string[]): ExitCode {
   return EXIT.REFUSED;
 }
 
-/** Installs the git hook and returns the lines that say what happened. */
-function installGitPart(root: string, launcher: Launcher): string[] {
+/** The lines of one part: its name before what it says, and whatever says more set in below. */
+function partLines(name: string, [first = '', ...more]: readonly string[]): string[] {
+  return [`${name}: ${first}`, ...more.map((line) => `  ${line}`)];
+}
+
+// --- install ---
+
+/** Installs the git hook, and says what happened. */
+function installGitHook(root: string, launcher: Launcher): string[] {
   const place = findHooksFolder(root);
-  if (place.kind === 'unknown') return ['git pre-push hook: NOT WRITTEN: git could not say where its hooks folder is'];
+  if (place.kind === 'unknown') return ['NOT WRITTEN: git could not say where its hooks folder is'];
   if (place.kind === 'custom') {
     return [
-      `git pre-push hook: NOT WRITTEN: git looks for hooks in "${place.setting}" (the setting core.hooksPath).`,
-      '  Such a folder is usually committed, and a hook written here holds paths of this machine.',
-      '  Add this line to the pre-push hook in that folder instead:',
-      `    ${SHARED_HOOK_LINE}`,
+      `NOT WRITTEN: git looks for hooks in "${place.setting}" (the setting core.hooksPath).`,
+      'Such a folder is usually committed, and a hook written here holds paths of this machine.',
+      'Add this line to the pre-push hook in that folder instead:',
+      `  ${SHARED_HOOK_LINE}`,
     ];
   }
   switch (installHook(place.folder, 'pre-push', launcher)) {
     case 'written':
-      return ['git pre-push hook: written'];
+      return ['written'];
     case 'updated':
-      return ['git pre-push hook: was already there, written again'];
+      return ['was already there, written again'];
     case 'written-after-keeping-older':
-      return [`git pre-push hook: written. The hook that was there is kept as ${keptName('pre-push')} and runs first`];
+      return [`written. The hook that was there is kept as ${keptName('pre-push')} and runs first`];
     case 'blocked-by-two-older-hooks':
       return [
-        `git pre-push hook: NOT WRITTEN: a pre-push hook that this tool did not write is there, and so is ${keptName('pre-push')}.`,
-        '  One of them has to go before the tool can keep the other. Merge the two by hand,',
-        '  then run "gotreceipts install" again.',
+        `NOT WRITTEN: a pre-push hook that this tool did not write is there, and so is ${keptName('pre-push')}.`,
+        'One of them has to go before the tool can keep the other. Merge the two by hand,',
+        'then run "gotreceipts install" again.',
       ];
   }
 }
 
-/** Installs the Claude Code hook entry and returns the lines that say what happened. */
-function installAgentPart(root: string, launcher: Launcher): string[] {
+/** Installs the Claude Code hook entry, and says what happened. */
+function installAgentEntry(root: string, launcher: Launcher): string[] {
   const result = installAgentHook(root, launcher);
   switch (result.outcome) {
     case 'written':
-    case 'updated': {
-      const lines = [
-        result.outcome === 'written'
-          ? `Claude Code hook: written into ${SETTINGS_FILE}`
-          : `Claude Code hook: was already in ${SETTINGS_FILE}, written again`,
+    case 'updated':
+      return [
+        result.outcome === 'written' ? `written into ${SETTINGS_FILE}` : `was already in ${SETTINGS_FILE}, written again`,
+        ...(result.newlyExcluded ? ['That file holds paths of this machine. It is now kept out of git through .git/info/exclude.'] : []),
+        'Claude Code reads its hooks when a session starts, so start a new session.',
       ];
-      if (result.newlyExcluded) lines.push('  That file holds paths of this machine. It is now kept out of git through .git/info/exclude.');
-      lines.push('  Claude Code reads its hooks when a session starts, so start a new session.');
-      return lines;
-    }
     case 'unreadable':
-      return [`Claude Code hook: NOT WRITTEN: ${SETTINGS_FILE} could not be read: ${result.reason}. Nothing in it was changed.`];
+      return [`NOT WRITTEN: ${SETTINGS_FILE} could not be read: ${result.reason}. Nothing in it was changed.`];
     case 'tracked':
       return [
-        `Claude Code hook: NOT WRITTEN: ${SETTINGS_FILE} is committed in this repository.`,
-        '  The entry holds a path of this machine, which does not belong in a committed file.',
+        `NOT WRITTEN: ${SETTINGS_FILE} is committed in this repository.`,
+        'The entry holds a path of this machine, which does not belong in a committed file.',
       ];
     case 'unsafe-path':
-      return ['Claude Code hook: NOT WRITTEN: the folder the tool is in has a quote, a dollar sign or a backtick in its name.'];
+      return ['NOT WRITTEN: the folder the tool is in has a quote, a dollar sign or a backtick in its name.'];
   }
 }
 
-/** Installs the skill and returns the lines that say what happened. */
-function installSkillPart(root: string, launcher: Launcher): string[] {
+/** Installs the skill, and says what happened. */
+function installTheSkill(root: string, launcher: Launcher): string[] {
   const result = installSkill(root, launcher);
   switch (result.outcome) {
     case 'written':
-    case 'updated': {
-      const lines = [
-        result.outcome === 'written'
-          ? `Claude Code skill: written into ${SKILL_FILE}`
-          : `Claude Code skill: was already in ${SKILL_FILE}, written again`,
+    case 'updated':
+      return [
+        result.outcome === 'written' ? `written into ${SKILL_FILE}` : `was already in ${SKILL_FILE}, written again`,
+        ...(result.newlyExcluded ? ['That file holds a path of this machine. It is now kept out of git through .git/info/exclude.'] : []),
       ];
-      if (result.newlyExcluded) lines.push('  That file holds a path of this machine. It is now kept out of git through .git/info/exclude.');
-      return lines;
-    }
     case 'foreign':
-      return [`Claude Code skill: NOT WRITTEN: another skill is at ${SKILL_FILE}, and this tool did not write it. It was left as it is.`];
+      return [`NOT WRITTEN: another skill is at ${SKILL_FILE}, and this tool did not write it. It was left as it is.`];
     case 'tracked':
       return [
-        `Claude Code skill: NOT WRITTEN: ${SKILL_FILE} is committed in this repository.`,
-        '  The skill this tool writes holds a path of this machine, which does not belong in a committed file.',
+        `NOT WRITTEN: ${SKILL_FILE} is committed in this repository.`,
+        'The skill this tool writes holds a path of this machine, which does not belong in a committed file.',
       ];
     case 'no-source':
-      return ['Claude Code skill: NOT WRITTEN: the skill that ships with the tool could not be read.'];
+      return ['NOT WRITTEN: the skill that ships with the tool could not be read.'];
   }
 }
 
@@ -178,11 +190,59 @@ export async function installCommand(args: readonly string[], io: Io): Promise<E
   }
 
   io.out('gotreceipts install:');
-  for (const line of [...installGitPart(root, launcher), ...installAgentPart(root, launcher), ...installSkillPart(root, launcher)]) {
-    io.out(`  ${line}`);
-  }
+  const said = [
+    ...partLines(PART.gitHook, installGitHook(root, launcher)),
+    ...partLines(PART.agentHook, installAgentEntry(root, launcher)),
+    ...partLines(PART.skill, installTheSkill(root, launcher)),
+  ];
+  for (const line of said) io.out(`  ${line}`);
   io.out('');
   return verdict(io, printReport(io, inspect(root, policy)));
+}
+
+// --- uninstall ---
+
+/** What one part says after "uninstall". `failed` is true when something of this tool is still there. */
+interface Removal {
+  readonly said: string;
+  readonly failed: boolean;
+}
+
+const GIT_HOOK_REMOVED: Readonly<Record<UninstallOutcome, string>> = {
+  removed: 'removed',
+  'removed-and-restored-older': `removed. The hook kept as ${keptName('pre-push')} is back in its place`,
+  'not-installed': 'was not installed, nothing to remove',
+  'not-ours': 'a hook is there that this tool did not write. It was left as it is',
+};
+
+const SKILL_REMOVED: Readonly<Record<SkillUninstall, string>> = {
+  removed: `removed from ${SKILL_FILE}`,
+  'not-installed': 'was not installed, nothing to remove',
+  'not-ours': 'a skill is there that this tool did not write. It was left as it is',
+};
+
+function removeGitHook(root: string): Removal {
+  const place = findHooksFolder(root);
+  if (place.kind === 'unknown') return { said: 'NOT REMOVED: git could not say where its hooks folder is', failed: true };
+  if (place.kind === 'custom') {
+    return { said: `git looks for hooks in "${place.setting}". The tool never wrote there, so there is nothing to remove`, failed: false };
+  }
+  return { said: GIT_HOOK_REMOVED[uninstallHook(place.folder, 'pre-push')], failed: false };
+}
+
+function removeAgentEntry(root: string): Removal {
+  switch (uninstallAgentHook(root)) {
+    case 'unreadable':
+      return { said: `NOT REMOVED: ${SETTINGS_FILE} could not be read. Nothing in it was changed`, failed: true };
+    case 'removed':
+      return { said: `removed from ${SETTINGS_FILE}`, failed: false };
+    case 'not-installed':
+      return { said: 'was not installed, nothing to remove', failed: false };
+  }
+}
+
+function removeTheSkill(root: string): Removal {
+  return { said: SKILL_REMOVED[uninstallSkill(root)], failed: false };
 }
 
 export async function uninstallCommand(args: readonly string[], io: Io): Promise<ExitCode> {
@@ -193,44 +253,26 @@ export async function uninstallCommand(args: readonly string[], io: Io): Promise
   const root = repoRoot(process.cwd());
   if (root === undefined) return start.cannotRun('this folder is not inside a git repository');
 
-  let failed = false;
   io.out('gotreceipts uninstall:');
-
-  const place = findHooksFolder(root);
-  if (place.kind === 'unknown') {
-    io.out('  git pre-push hook: NOT REMOVED: git could not say where its hooks folder is');
-    failed = true;
-  } else if (place.kind === 'custom') {
-    io.out(`  git pre-push hook: git looks for hooks in "${place.setting}". The tool never wrote there, so there is nothing to remove`);
-  } else {
-    const said = {
-      removed: 'removed',
-      'removed-and-restored-older': `removed. The hook kept as ${keptName('pre-push')} is back in its place`,
-      'not-installed': 'was not installed, nothing to remove',
-      'not-ours': 'a hook is there that this tool did not write. It was left as it is',
-    }[uninstallHook(place.folder, 'pre-push')];
-    io.out(`  git pre-push hook: ${said}`);
+  const parts: readonly (readonly [name: string, remove: (root: string) => Removal])[] = [
+    [PART.gitHook, removeGitHook],
+    [PART.agentHook, removeAgentEntry],
+    [PART.skill, removeTheSkill],
+  ];
+  // Each part is tried, whatever happened to the one before it.
+  let failed = false;
+  for (const [name, remove] of parts) {
+    const removal = remove(root);
+    io.out(`  ${name}: ${removal.said}`);
+    if (removal.failed) failed = true;
   }
-
-  const agent = uninstallAgentHook(root);
-  if (agent === 'unreadable') {
-    io.out(`  Claude Code hook: NOT REMOVED: ${SETTINGS_FILE} could not be read. Nothing in it was changed`);
-    failed = true;
-  } else {
-    io.out(`  Claude Code hook: ${agent === 'removed' ? `removed from ${SETTINGS_FILE}` : 'was not installed, nothing to remove'}`);
-  }
-
-  const skillSaid = {
-    removed: `removed from ${SKILL_FILE}`,
-    'not-installed': 'was not installed, nothing to remove',
-    'not-ours': 'a skill is there that this tool did not write. It was left as it is',
-  }[uninstallSkill(root)];
-  io.out(`  Claude Code skill: ${skillSaid}`);
 
   if (failed) return EXIT.REFUSED;
   io.out('From now on, nothing in this clone is checked by this tool.');
   return EXIT.PASS;
 }
+
+// --- doctor ---
 
 export async function doctorCommand(args: readonly string[], io: Io): Promise<ExitCode> {
   const setup = setUp('doctor', DOCTOR_USAGE, args, io);

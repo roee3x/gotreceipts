@@ -18,7 +18,9 @@ A record belongs to one commit. Every new commit needs its own gate run. That in
 
 ## Reading the answers
 
-Every command ends with a `VERDICT:` line or a `CANNOT RUN` line, and with one of three exit codes.
+A command that judges something ends with a `VERDICT:` line: `gate`, `verify`, `merge`, `audit`, `doctor`, and the check that runs before a push. `send`, `fetch` and `policy` judge nothing, so they end with a plain sentence. A command that could not run says `CANNOT RUN`, or names the option it did not understand.
+
+Every command ends with one of three exit codes.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
@@ -35,7 +37,7 @@ What the common answers mean:
 - **"the merged result would not be what was tested"**: the target branch holds changes that your commit does not contain. Merge the target branch into yours, run the gate on the new commit, push, and merge again.
 - **"there are uncommitted changes"**: the gate could not run. Commit or stash, then run it.
 - **"this commit changes the policy file"**: the commit holds another policy than the branch it wants to enter. It is judged by the policy that is already on that branch, so the change does not help it pass. Tell the user that the commit changes the policy.
-- **"protected file is not the same as on"** the target branch: the commit would change a file that is part of the gate itself. Tell the user which files, by name. If you did not mean to change them, put them back as they are on the target branch.
+- **"not the same as on"** the target branch, said of one or more protected files: the commit would change a file that is part of the gate itself. Tell the user which files, by name. If you did not mean to change them, put them back as they are on the target branch.
 - **"approval: needed"**, and **"no valid approval"**: the commit needs the signature of an owner before it may enter that branch. You cannot give it. Tell the user which commit, which branch and why, and give them the command from the last line of the answer. They run it in their own terminal. Then run your command again.
 
 ## Rules

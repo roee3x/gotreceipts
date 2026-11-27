@@ -12,6 +12,16 @@ import { isCommitted, keepOutOfGit } from './local-file.ts';
  * The local settings file is the one Claude Code keeps for a single machine. It is the right
  * place because the entry holds the path of the tool on this machine, like the git hook does.
  *
+ * The part of the file this code reads and writes looks like this:
+ *
+ *   { "hooks": { "PreToolUse": [
+ *       { "matcher": "Bash|Edit", "hooks": [ { "type": "command", "command": "..." } ] }
+ *   ] } }
+ *
+ * "PreToolUse" is a list of groups. A group names the tools it is for, and holds the entries
+ * that are called for those tools. Everything else in the file belongs to the user and stays
+ * exactly as it is.
+ *
  * Checked against the Claude Code settings and hooks reference on 2026-11-27, with Claude Code 2.1.332.
  */
 
@@ -23,6 +33,8 @@ export const SETTINGS_FILE = '.claude/settings.local.json';
  * ones that change a file. "MultiEdit" is a name older versions of Claude Code used.
  */
 export const MATCHER = 'Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit';
+
+/** What the command of an entry of this tool ends with. It is how such an entry is told from the others. */
 const HOOK_WORDS = 'hook claude-code';
 
 /**
@@ -34,18 +46,11 @@ export function hookCommandLine(launcher: Launcher): string | undefined {
   return start === undefined ? undefined : `${start} ${HOOK_WORDS}`;
 }
 
-/** True for a hook entry that this tool wrote. */
-function isOurs(handler: unknown): boolean {
-  return isObject(handler) && typeof handler['command'] === 'string' && handler['command'].trimEnd().endsWith(` ${HOOK_WORDS}`);
-}
-
-/** The entry file a hook entry of this tool calls. */
-function cliOf(handler: Json): string | undefined {
-  return /^node "(.*)" hook claude-code\s*$/.exec(String(handler['command']))?.[1];
-}
+// --- the file ---
 
 type Settings = { readonly ok: true; readonly settings: Json } | { readonly ok: false; readonly reason: string };
 
+/** Reads the settings. A file that is not there is an empty one. A file this code cannot follow is not touched. */
 function readSettings(path: string): Settings {
   if (!existsSync(path)) return { ok: true, settings: {} };
   let parsed: unknown;
@@ -62,11 +67,49 @@ function readSettings(path: string): Settings {
   return { ok: true, settings: parsed };
 }
 
-/** Every hook entry of this tool in the settings. */
-function ourHandlers(settings: Json): Json[] {
+function writeSettings(path: string, settings: Json): void {
+  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+// --- the entries of this tool, among everything else in the file ---
+
+/** True for a hook entry that this tool wrote. */
+function isOurs(entry: unknown): entry is Json {
+  return isObject(entry) && typeof entry['command'] === 'string' && entry['command'].trimEnd().endsWith(` ${HOOK_WORDS}`);
+}
+
+/** The entry file an entry of this tool calls. */
+function cliOf(entry: Json): string | undefined {
+  return new RegExp(`^node "(.*)" ${HOOK_WORDS}\\s*$`).exec(String(entry['command']))?.[1];
+}
+
+/** One group of "PreToolUse", with the entries of this tool told apart from the rest. */
+interface Group {
+  /** The group as the file holds it. It may be anything: what this code cannot read, it keeps. */
+  readonly written: unknown;
+  /** The tools the group is for, as written. */
+  readonly matcher: unknown;
+  readonly ours: readonly Json[];
+  readonly others: readonly unknown[];
+}
+
+/** The one walk over the groups. Reading the state, adding the entry and taking it out all start here. */
+function groupsOf(settings: Json): Group[] {
   const hooks = settings['hooks'];
-  const groups = isObject(hooks) && Array.isArray(hooks['PreToolUse']) ? (hooks['PreToolUse'] as unknown[]) : [];
-  return groups.flatMap((group) => (isObject(group) && Array.isArray(group['hooks']) ? (group['hooks'] as unknown[]) : [])).filter(isOurs) as Json[];
+  const groups: unknown[] = isObject(hooks) && Array.isArray(hooks['PreToolUse']) ? hooks['PreToolUse'] : [];
+  return groups.map((written) => {
+    const entries: unknown[] = isObject(written) && Array.isArray(written['hooks']) ? written['hooks'] : [];
+    return {
+      written,
+      matcher: isObject(written) ? written['matcher'] : undefined,
+      ours: entries.filter(isOurs),
+      others: entries.filter((entry) => !isOurs(entry)),
+    };
+  });
+}
+
+function hasOurs(settings: Json): boolean {
+  return groupsOf(settings).some((group) => group.ours.length > 0);
 }
 
 /** The settings with every entry of this tool taken out, and everything else as it was. */
@@ -74,14 +117,13 @@ function withoutOurs(settings: Json): Json {
   const hooks = settings['hooks'];
   if (!isObject(hooks) || !Array.isArray(hooks['PreToolUse'])) return settings;
 
-  const groups = (hooks['PreToolUse'] as unknown[]).flatMap((group): unknown[] => {
-    if (!isObject(group) || !Array.isArray(group['hooks'])) return [group];
-    const kept = (group['hooks'] as unknown[]).filter((handler) => !isOurs(handler));
-    if (kept.length === group['hooks'].length) return [group];
+  const groups = groupsOf(settings).flatMap(({ written, ours, others }): unknown[] => {
+    if (ours.length === 0 || !isObject(written)) return [written];
     // A group that only held our entry goes with it.
-    return kept.length === 0 ? [] : [{ ...group, hooks: kept }];
+    return others.length === 0 ? [] : [{ ...written, hooks: others }];
   });
 
+  // A list that is empty afterwards goes too, and so does a "hooks" entry that is empty afterwards.
   const nextHooks: Json = { ...hooks };
   if (groups.length > 0) nextHooks['PreToolUse'] = groups;
   else delete nextHooks['PreToolUse'];
@@ -92,22 +134,16 @@ function withoutOurs(settings: Json): Json {
   return next;
 }
 
+/** The settings with one entry of this tool, in a group of its own at the end of the list. An older entry is replaced. */
 function withOurs(settings: Json, commandLine: string): Json {
   const cleaned = withoutOurs(settings);
   const hooks = isObject(cleaned['hooks']) ? cleaned['hooks'] : {};
-  const groups = Array.isArray(hooks['PreToolUse']) ? (hooks['PreToolUse'] as unknown[]) : [];
+  const groups: unknown[] = Array.isArray(hooks['PreToolUse']) ? hooks['PreToolUse'] : [];
   const ours = { matcher: MATCHER, hooks: [{ type: 'command', command: commandLine, timeout: 10 }] };
   return { ...cleaned, hooks: { ...hooks, PreToolUse: [...groups, ours] } };
 }
 
-/** The tools each entry of this tool is called for, as written in the settings. */
-function ourMatchers(settings: Json): unknown[] {
-  const hooks = settings['hooks'];
-  const groups = isObject(hooks) && Array.isArray(hooks['PreToolUse']) ? (hooks['PreToolUse'] as unknown[]) : [];
-  return groups
-    .filter((group): group is Json => isObject(group) && Array.isArray(group['hooks']) && (group['hooks'] as unknown[]).some(isOurs))
-    .map((group) => group['matcher']);
-}
+// --- what the rest of the tool asks ---
 
 export type AgentState =
   | { readonly kind: 'none' }
@@ -122,10 +158,13 @@ export type AgentState =
 export function readAgentState(root: string): AgentState {
   const read = readSettings(join(root, SETTINGS_FILE));
   if (!read.ok) return { kind: 'unreadable', reason: read.reason };
-  const [first] = ourHandlers(read.settings);
+
+  const withOurEntry = groupsOf(read.settings).filter((group) => group.ours.length > 0);
+  const first = withOurEntry[0]?.ours[0];
   if (first === undefined) return { kind: 'none' };
-  const matchers = ourMatchers(read.settings);
-  return { kind: 'installed', cli: cliOf(first), current: matchers.length === 1 && matchers[0] === MATCHER };
+  // This version writes one group, for the tools of MATCHER. Anything else was written by another version.
+  const current = withOurEntry.length === 1 && withOurEntry[0]?.matcher === MATCHER;
+  return { kind: 'installed', cli: cliOf(first), current };
 }
 
 export type AgentInstall =
@@ -145,9 +184,9 @@ export function installAgentHook(root: string, launcher: Launcher): AgentInstall
   const read = readSettings(path);
   if (!read.ok) return { outcome: 'unreadable', reason: read.reason };
 
-  const had = ourHandlers(read.settings).length > 0;
+  const had = hasOurs(read.settings);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(withOurs(read.settings, commandLine), null, 2)}\n`);
+  writeSettings(path, withOurs(read.settings, commandLine));
   return { outcome: had ? 'updated' : 'written', newlyExcluded: keepOutOfGit(root, SETTINGS_FILE) };
 }
 
@@ -158,10 +197,10 @@ export function uninstallAgentHook(root: string): AgentUninstall {
   const path = join(root, SETTINGS_FILE);
   const read = readSettings(path);
   if (!read.ok) return 'unreadable';
-  if (ourHandlers(read.settings).length === 0) return 'not-installed';
+  if (!hasOurs(read.settings)) return 'not-installed';
 
   const next = withoutOurs(read.settings);
   if (Object.keys(next).length === 0) rmSync(path);
-  else writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+  else writeSettings(path, next);
   return 'removed';
 }
