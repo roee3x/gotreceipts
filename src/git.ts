@@ -50,6 +50,18 @@ export function resolveCommit(root: string, name: string): string | undefined {
   return sha === '' ? undefined : sha;
 }
 
+/**
+ * The commit a ref points to, by its full name, for example "refs/heads/main".
+ * Only an exact name counts. A name is never read as an expression such as "main~1".
+ */
+export function refCommit(root: string, fullName: string): string | undefined {
+  if (!fullName.startsWith('refs/')) return undefined;
+  const result = git(['show-ref', '--verify', '--hash', fullName], root);
+  if (!result.ok) return undefined;
+  const sha = result.stdout.trim();
+  return /^[0-9a-f]{40,64}$/.test(sha) && hasCommit(root, sha) ? sha : undefined;
+}
+
 /** The id of the file tree of the commit that is checked out. */
 export function headTree(root: string): string | undefined {
   const result = git(['rev-parse', '--verify', '--quiet', 'HEAD^{tree}'], root);

@@ -2,10 +2,10 @@ import { homedir } from 'node:os';
 import { parseArgs } from 'node:util';
 
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { currentBranch, headCommit, headTree, uncommittedChanges } from '../git.ts';
+import { currentBranch, headCommit, headTree, repoRoot, uncommittedChanges } from '../git.ts';
 import type { Io } from '../main.ts';
+import { knownTarget, policyFor, sourceLines } from '../policy/committed.ts';
 import { policyId } from '../policy/hash.ts';
-import { loadPolicy } from '../policy/load.ts';
 import { checksForLevel, tierForBranch, type Policy } from '../policy/policy.ts';
 import { scrubPaths, type GateRecord } from '../record/record.ts';
 import { recordLabel, writeRecord } from '../record/store.ts';
@@ -23,8 +23,13 @@ export const GATE_USAGE = [
   '  --for <branch>    Run the level a commit needs to enter this branch',
   '  (neither)         Run the level of the branch you are on',
   '',
+  'Which policy:',
+  '  With --for, or with neither, the policy is the one that is already on that branch, as this',
+  '  clone last saw it. What the commit did to its own copy of gotreceipts.json does not count.',
+  '  With --level, or for a branch that does not exist yet, it is the policy in the commit itself.',
+  '  Only a committed policy is read, never the file in the folder.',
+  '',
   'Options:',
-  '  --file <file>     Read this policy file instead of gotreceipts.json at the top of the repository',
   '  -h, --help        Show this help',
   '',
   'The gate refuses to run while there are uncommitted changes, because its result',
@@ -36,8 +41,16 @@ export const GATE_USAGE = [
 export interface GateOptions {
   level?: string;
   for?: string;
-  file?: string;
   help?: boolean;
+}
+
+/**
+ * The branch the commit is taken to be entering: the one named with --for, else the one that
+ * is checked out. With --level no branch is named, so there is none.
+ */
+export function targetBranch(options: Pick<GateOptions, 'level' | 'for'>, branch: string | undefined): string | undefined {
+  if (options.level !== undefined) return undefined;
+  return options.for ?? branch;
 }
 
 /** Picks the level to run, or explains why none could be picked. */
@@ -92,7 +105,6 @@ export async function gateCommand(args: readonly string[], io: Io): Promise<Exit
       options: {
         level: { type: 'string' },
         for: { type: 'string' },
-        file: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
       allowPositionals: false,
@@ -114,28 +126,16 @@ export async function gateCommand(args: readonly string[], io: Io): Promise<Exit
     return EXIT.CANNOT_RUN;
   };
 
-  // 1. The policy.
-  const loaded = loadPolicy(process.cwd(), options.file);
-  if (!loaded.ok) {
-    for (const error of loaded.errors) io.err(`gotreceipts gate: CANNOT RUN: ${error}`);
-    return EXIT.CANNOT_RUN;
-  }
-  const { policy, root } = loaded;
+  // 1. The exact commit the result will be about.
+  const root = repoRoot(process.cwd());
   if (root === undefined) return cannotRun('this folder is not inside a git repository');
-
-  // 2. The exact commit the result will be about.
   const commit = headCommit(root);
   if (commit === undefined) return cannotRun('the repository has no commit yet');
   const tree = headTree(root);
   if (tree === undefined) return cannotRun('git could not read the commit');
   const branch = currentBranch(root);
 
-  // 3. The level.
-  const chosen = chooseLevel(policy, options, branch);
-  if ('error' in chosen) return cannotRun(chosen.error);
-  const checks = checksForLevel(policy, chosen.level) ?? [];
-
-  // 4. A clean folder. With loose changes, "this commit passed" would not be true.
+  // 2. A clean folder. With loose changes, "this commit passed" would not be true.
   const changes = uncommittedChanges(root);
   if (changes === undefined) return cannotRun('git could not report the state of the folder');
   if (changes.length > 0) {
@@ -146,10 +146,27 @@ export async function gateCommand(args: readonly string[], io: Io): Promise<Exit
     return EXIT.CANNOT_RUN;
   }
 
+  // 3. The policy: the one on the branch the commit wants to enter, not the commit's own copy.
+  const target = targetBranch(options, branch);
+  const picked = policyFor(root, commit, target === undefined ? undefined : knownTarget(root, target));
+  if (!picked.ok) {
+    for (const error of picked.errors) io.err(`gotreceipts gate: CANNOT RUN: ${error}`);
+    return EXIT.CANNOT_RUN;
+  }
+  const { policy } = picked;
+
+  // 4. The level.
+  const chosen = chooseLevel(policy, options, branch);
+  if ('error' in chosen) return cannotRun(chosen.error);
+  const checks = checksForLevel(policy, chosen.level) ?? [];
+
   // 5. Say what will run before running it. A check that silently goes missing is then visible.
   const id = policyId(policy);
   const shortCommit = commit.slice(0, 7);
+  const [policyLine = '', ...policyNotes] = sourceLines(picked.source);
   io.out(`gotreceipts gate: level ${chosen.level} on commit ${shortCommit}${branch === undefined ? '' : ` (branch ${branch})`}`);
+  io.out(`Policy: ${policyLine}`);
+  for (const note of policyNotes) io.out(`        ${note}`);
   io.out(`Policy id: ${id}`);
   io.out(`${checks.length} checks to run: ${checks.map((check) => check.name).join(', ')}`);
 

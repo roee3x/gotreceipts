@@ -50,8 +50,8 @@ function revision(folder: string, name: string): string {
  * A repository with a feature branch one commit ahead of the target branch, both pushed,
  * and a pull request #7 from the one into the other.
  */
-function scene(t: TestContext, base = 'main'): Scene {
-  const repo = tempRepo(t, { policy: POLICY });
+function scene(t: TestContext, base = 'main', withPolicy = true): Scene {
+  const repo = tempRepo(t, withPolicy ? { policy: POLICY } : {});
   const remote = addRemote(t, repo);
   assert.equal(gitIn(repo, 'push', '--quiet', 'origin', `feature/thing:${base}`).status, 0);
 
@@ -314,9 +314,62 @@ test('when the GitHub tool is missing or fails, the command cannot run', (t) => 
   assert.deepEqual(s.mergeRequests(), []);
 });
 
-test('without a policy the command cannot run', (t) => {
-  const repo = tempRepo(t);
-  const result = runCli(repo, ['merge', '7']);
+test('without a committed policy the command cannot run', (t) => {
+  const s = scene(t, 'main', false);
+  const result = runCli(s.repo, ['merge', '7'], s.env);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /gotreceipts merge: CANNOT RUN: no policy file at/);
+  assert.match(result.stderr, /gotreceipts merge: CANNOT RUN: commit \w{7} holds no policy file \(gotreceipts\.json\)/);
+  assert.deepEqual(s.mergeRequests(), []);
+});
+
+// --- which policy counts ---
+
+test('a pull request that takes the level off its target branch is still judged by the policy on that branch', (t) => {
+  const s = scene(t);
+  // The pull request's own copy of the policy no longer sets a level for main.
+  writeIn(s.repo, 'gotreceipts.json', `${JSON.stringify({ ...POLICY, tiers: [POLICY.tiers[0]] }, null, 2)}\n`);
+  assert.equal(gitIn(s.repo, 'commit', '--quiet', '--all', '-m', 'test: main needs nothing').status, 0);
+  assert.equal(gitIn(s.repo, 'push', '--quiet', 'origin', 'feature/thing').status, 0);
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /policy: the one on origin\/main, at commit \w{7}/);
+  assert.match(result.stdout, /this commit changes the policy file\. It is judged by the policy that is already on origin\/main/);
+  assert.match(result.stdout, /commit \w{7} needs level G1/);
+  assert.match(result.stdout, /VERDICT: REFUSED \(there is no record for this commit\)\. Nothing was merged\./);
+  assert.deepEqual(s.mergeRequests(), []);
+});
+
+test('a record made under the easier policy of the pull request itself does not merge it', (t) => {
+  const s = scene(t);
+  // The pull request swaps the check of G1 for another one, and gates itself under that.
+  const easier = structuredClone(POLICY);
+  easier.levels[1]!.checks[0]!.name = 'easier';
+  writeIn(s.repo, 'gotreceipts.json', `${JSON.stringify(easier, null, 2)}\n`);
+  assert.equal(gitIn(s.repo, 'commit', '--quiet', '--all', '-m', 'test: an easier G1').status, 0);
+  assert.equal(gitIn(s.repo, 'push', '--quiet', 'origin', 'feature/thing').status, 0);
+  assert.equal(runCli(s.repo, ['gate', '--level', 'G1']).status, 0, 'its own policy passes');
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /G1 record, passed 0\.0 hours ago: it was made under a different policy than the current one/);
+  assert.equal(lastLine(result.stdout), 'To make a record: gotreceipts gate --for main');
+  assert.deepEqual(s.mergeRequests(), []);
+});
+
+test('the policy is the one the remote has now, not the one this clone remembers', (t) => {
+  const s = scene(t);
+  assert.equal(runCli(s.repo, ['gate', '--for', 'main']).status, 0);
+  // A stricter policy reaches main on the remote, and the local memory of main is wound back.
+  const stricter = structuredClone(POLICY);
+  stricter.levels[1]!.checks.push({ name: 'added-later', run: 'node checks/pass.js' });
+  const moved = moveBase(s, 'gotreceipts.json', `${JSON.stringify(stricter, null, 2)}\n`);
+  assert.equal(gitIn(s.repo, 'push', '--quiet', 'origin', `${moved}:main`).status, 0);
+  assert.equal(gitIn(s.repo, 'update-ref', 'refs/remotes/origin/main', `${s.head}~1`).status, 0);
+
+  const result = runCli(s.repo, ['merge', '7'], s.env);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, new RegExp(`policy: the one on origin/main, at commit ${moved.slice(0, 7)}`));
+  assert.match(result.stdout, /it was made under a different policy than the current one/);
+  assert.deepEqual(s.mergeRequests(), []);
 });

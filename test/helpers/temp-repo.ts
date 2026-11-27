@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { TestContext } from 'node:test';
@@ -117,6 +117,14 @@ export function addRemote(t: TestContext, repo: string): string {
   assert.equal(gitIn(remote, 'init', '--quiet', '--bare').status, 0);
   assert.equal(gitIn(repo, 'remote', 'add', 'origin', remote).status, 0);
   return remote;
+}
+
+/** Puts a pre-push hook in the repository that calls the built tool, like an installed hook would. */
+export function installPushHook(repo: string): void {
+  const node = process.execPath.replace(/\\/g, '/');
+  const cli = cliPath.replace(/\\/g, '/');
+  const path = writeIn(repo, '.git/hooks/pre-push', `#!/bin/sh\nexec "${node}" "${cli}" hook pre-push "$@"\n`);
+  chmodSync(path, 0o755);
 }
 
 /**

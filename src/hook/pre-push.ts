@@ -1,7 +1,7 @@
 import { EXIT, type ExitCode } from '../exit-codes.ts';
-import { headCommit } from '../git.ts';
+import { hasCommit, headCommit, repoRoot } from '../git.ts';
 import type { Io } from '../main.ts';
-import { loadPolicy } from '../policy/load.ts';
+import { policyFor, sourceLines, type PolicyChoice } from '../policy/committed.ts';
 import { tierForBranch, type Policy } from '../policy/policy.ts';
 import { shownAge } from '../verify/decide.ts';
 import { judgeCommit } from '../verify/judge.ts';
@@ -46,18 +46,38 @@ export function parsePushLines(
   return { ok: true, refs };
 }
 
+/** A commit that would enter a branch, as far as the policy needs to know it. */
+export interface Entering {
+  readonly branch: string;
+  /** The pushed commit. */
+  readonly commit: string;
+  /** The commit the branch points to on the remote now. Undefined when the branch is new there. */
+  readonly targetCommit: string | undefined;
+}
+
 /** What the hook will do about one pushed ref. */
 export type PushStep =
-  | { readonly kind: 'check'; readonly branch: string; readonly commit: string; readonly level: string }
-  | { readonly kind: 'skip'; readonly name: string; readonly reason: string };
+  | {
+      readonly kind: 'check';
+      readonly branch: string;
+      readonly commit: string;
+      readonly level: string;
+      readonly policy: Policy;
+      /** Things to say about which policy was used. Empty in the plain case. */
+      readonly notes: readonly string[];
+    }
+  | { readonly kind: 'skip'; readonly name: string; readonly reason: string }
+  /** The policy for this branch could not be read, so nothing about it can be checked. */
+  | { readonly kind: 'error'; readonly name: string; readonly errors: readonly string[] };
 
 /**
- * Decides, for every pushed ref, whether it needs a record and at which level.
+ * Decides, for every pushed ref, whether it needs a record, at which level, and under which policy.
  *
- * Only a branch the policy names a level for is checked. The policy says which branches are
- * guarded, and the hook does not invent rules of its own.
+ * `policyOf` gives the policy a commit is judged by when it enters a branch: the one that is
+ * already on that branch. Only a branch that policy names a level for is checked. The policy
+ * says which branches are guarded, and the hook does not invent rules of its own.
  */
-export function planPush(policy: Policy, refs: readonly PushedRef[]): PushStep[] {
+export function planPush(refs: readonly PushedRef[], policyOf: (entering: Entering) => PolicyChoice): PushStep[] {
   return refs.map((ref): PushStep => {
     if (!ref.remoteRef.startsWith(BRANCH_PREFIX)) {
       return { kind: 'skip', name: ref.remoteRef, reason: 'not a branch' };
@@ -66,11 +86,18 @@ export function planPush(policy: Policy, refs: readonly PushedRef[]): PushStep[]
     if (NO_COMMIT.test(ref.localSha)) {
       return { kind: 'skip', name: branch, reason: 'the branch is being deleted, so no commit enters it' };
     }
-    const tier = tierForBranch(policy, branch);
+    const targetCommit = NO_COMMIT.test(ref.remoteSha) ? undefined : ref.remoteSha;
+    const picked = policyOf({ branch, commit: ref.localSha, targetCommit });
+    if (!picked.ok) return { kind: 'error', name: branch, errors: picked.errors };
+
+    const tier = tierForBranch(picked.policy, branch);
     if (tier === undefined) {
       return { kind: 'skip', name: branch, reason: 'the policy sets no level for this branch' };
     }
-    return { kind: 'check', branch, commit: ref.localSha, level: tier.level };
+    // The plain case, the policy that is already on the branch, is not spelled out on every push.
+    const [first = '', ...more] = sourceLines(picked.source);
+    const notes = picked.source.kind === 'own' ? [`policy: ${first}`] : more;
+    return { kind: 'check', branch, commit: ref.localSha, level: tier.level, policy: picked.policy, notes };
   });
 }
 
@@ -83,6 +110,9 @@ function plural(count: number, one: string, many: string): string {
  * Every commit that would enter a branch with a level must have a valid record at that level.
  * If one does not, the whole push is refused.
  *
+ * The level and the checks come from the policy that is already on the branch on the remote.
+ * A commit that edits the policy file is still judged by the policy it found there.
+ *
  * `input` is what git wrote to the hook, and `now` is the current time in milliseconds.
  */
 export function prePush(input: string, io: Io, now: number): ExitCode {
@@ -92,15 +122,32 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
     return EXIT.CANNOT_RUN;
   };
 
-  const loaded = loadPolicy(process.cwd());
-  if (!loaded.ok) return cannotCheck(loaded.errors);
-  const { policy, root } = loaded;
+  const root = repoRoot(process.cwd());
   if (root === undefined) return cannotCheck(['this folder is not inside a git repository']);
 
   const parsed = parsePushLines(input);
   if (!parsed.ok) return cannotCheck([parsed.error]);
 
-  const steps = planPush(policy, parsed.refs);
+  // Git tells the hook which commit each branch points to on the remote right now. The policy
+  // is read from that commit, so it is the remote's own, not what this clone remembers of it.
+  const steps = planPush(parsed.refs, ({ branch, commit, targetCommit }): PolicyChoice => {
+    if (!hasCommit(root, commit)) {
+      return { ok: false, errors: [`this clone does not hold commit ${commit.slice(0, 7)}, which the push names`] };
+    }
+    if (targetCommit !== undefined && !hasCommit(root, targetCommit)) {
+      return {
+        ok: false,
+        errors: [
+          `"${branch}" on the remote is at commit ${targetCommit.slice(0, 7)}, which this clone does not hold, so its policy cannot be read. Run "git fetch" and push again`,
+        ],
+      };
+    }
+    return policyFor(root, commit, { branch, commit: targetCommit, shown: `"${branch}" on the remote` });
+  });
+
+  const errors = steps.flatMap((step) => (step.kind === 'error' ? step.errors.map((error) => `${step.name}: ${error}`) : []));
+  if (errors.length > 0) return cannotCheck(errors);
+
   const toCheck = steps.filter((step) => step.kind === 'check');
   io.out(`gotreceipts pre-push: ${plural(toCheck.length, 'branch', 'branches')} to check`);
 
@@ -109,19 +156,22 @@ export function prePush(input: string, io: Io, now: number): ExitCode {
   let refused = 0;
 
   for (const step of steps) {
+    if (step.kind === 'error') continue;
     if (step.kind === 'skip') {
       io.out(`  ${step.name}: not checked (${step.reason})`);
       continue;
     }
     const shortCommit = step.commit.slice(0, 7);
-    const { decision, unreadable } = judgeCommit(root, policy, step.commit, step.level, now);
+    const { decision, unreadable } = judgeCommit(root, step.policy, step.commit, step.level, now);
     const subject = `  ${step.branch}: commit ${shortCommit} needs level ${step.level}`;
 
     if (decision.ok) {
       io.out(`${subject}: PASS (${decision.record.level} record, passed ${shownAge(decision.ageHours)} hours ago)`);
+      for (const note of step.notes) io.out(`      ${note}`);
     } else {
       refused += 1;
       io.out(`${subject}: REFUSED (${decision.summary})`);
+      for (const note of step.notes) io.out(`      ${note}`);
       for (const detail of decision.details) io.out(`      ${detail}`);
       const command = `gotreceipts gate --for ${step.branch}`;
       advice.push(step.commit === head ? `  ${command}` : `  ${command}   (with commit ${shortCommit} checked out)`);

@@ -156,7 +156,10 @@ export function printReport(io: Io, inspection: Inspection): string[] {
 
   io.out('');
   io.out('This clone stops:');
-  if (pushHook) io.out('  - "git push" of a commit that has no valid record, into a branch with a level.');
+  if (pushHook) {
+    io.out('  - "git push" of a commit that has no valid record, into a branch with a level.');
+    io.out('  - A commit that edits the policy file to get itself in. It is judged by the policy that is already on the branch.');
+  }
   if (inspection.prePush.state === 'broken') io.out('  - Every "git push", because the hook cannot find its tool.');
   if (agentHook) {
     io.out('  - Claude Code running a bare "gh pr merge", the same merge through "gh api", or "git push --no-verify".');
@@ -171,6 +174,7 @@ export function printReport(io: Io, inspection: Inspection): string[] {
   io.out('  - Another coding agent than Claude Code, and Claude Code itself when its hook cannot run. That hook is early feedback, not a lock.');
   io.out('  - A push from another clone. Hooks do not come with a clone: run "gotreceipts install" once in each.');
   io.out('  - A record that someone wrote by hand inside the .git folder.');
+  io.out('  - A change to the policy file that was merged like any other change. From then on it is the policy.');
   io.out('');
 
   const missing: string[] = [];
